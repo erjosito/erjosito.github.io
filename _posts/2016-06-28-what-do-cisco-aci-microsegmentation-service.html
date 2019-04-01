@@ -1,0 +1,58 @@
+---
+layout: post
+title: What do Cisco ACI, microsegmentation, service insertion, REST and Docker containers
+  have in common?
+date: 2016-06-28 09:19:59.000000000 +02:00
+type: post
+parent_id: '0'
+published: true
+password: ''
+status: publish
+categories: []
+tags:
+- aci
+- automation
+- bigip
+- ciscoaci
+- compliance
+- docker
+- f5
+- microsegmentation
+- network automation
+- networking
+- nfv
+- python
+- rest
+- rest api
+- sdn
+- service chain
+- service graph
+meta:
+  tumblr_erjosito_permalink: http://erjosito.tumblr.com/post/146597278872/what-do-cisco-aci-microsegmentation-service
+  tumblr_erjosito_id: '146597278872'
+  _wp_old_slug: '146597278872'
+author:
+  login: erjosito
+  email: erjosito@hotmail.com
+  display_name: erjosito
+  first_name: ''
+  last_name: ''
+permalink: "/2016/06/28/what-do-cisco-aci-microsegmentation-service/"
+---
+<p>Lately I have been involved in quite some conversations, where organisations have shown a lot of interest in the integration between Cisco ACI and F5 BigIP and BigIQ (or should I say iWorkflow?).</p>
+<p>As you might know, Cisco ACI offers the option to integrate L4-L7 services in the network. What does this mean?</p>
+<ol>
+<li>Optionally, you can have the Cisco ACI controller (APIC) inserting the L4-L7 device or devices in the data path, taking the hassle from you to stitch VLANs (or EPGs) together so that packets flow through the devices in the order you want.</li>
+<li>Additionally, you have the possibility of having APIC configuring your L4-L7 device with the required network attributes (IP addresses, transparent bridges) and L4-L7 attributes (access lists, virtual IP addresses).</li>
+</ol>
+<p>Note that these are totally optional. If you decide not to use service insertion, you can certainly attach network service devices to an ACI network the old fashioned way (I will call it “VLAN stitching”). And if you only want option 1 (that is, “APIC, don’t touch my firewall”), you can use unmanaged service graphs.</p>
+<p>But let’s assume that you go for the full thing, with managed service graphs. If you have ever configured service graphs in ACI, you already know that it is not the easiest feature to configure. So why adding additional complexity to your environment?</p>
+<p>One of the most common reasons is to have a single API to manage your L2-L7 network. And since ACI’s REST API has a lot of goodies (read API inspector, debug mode, Visore, Python SDK and Arya automatic Python code generation to name a few), APIC is a good candidate for this API consolidation task.</p>
+<p><b>First advantage</b>: It means that you can configure your firewalls and load balancers using ACI’s API. And now you can use all the great automation possibilities in ACI to build your solution, be it with orchestration solutions like Cisco UCS Director or Cisco CloudCenter, or with your own set of scripts. I promise, you will be developing automation much much quicker with ACI than with other APIs in the market.</p>
+<p>But wait a sec: if the network configures the load balancer, could we leverage some network knowledge in that configuration? Like dynamically deploying your web server pools depending on the IP addresses existing in the network?</p>
+<p><b>Second advantage</b>: that is exactly what APIC does (sometimes called “Dynamic Endpoint Attach”). If you configure your F5 server pool as “dynamic” in APIC, pool members will appear and disappear as end points come and go from your network. A very important thing to note is that this is not restricted to virtual machines, but includes anything that you might have as a Web server. Including Docker containers, what I am showing in the video below.</p>
+<p>But wait, you might not want every single server in that VLAN to pop up as a Web server in my BigIP? And this is where microsegmentation comes into play. Remember that you can configure your ACI EPGs (End Point Groups, think of them as “server zones”) matching your VLANs one to one, but you don’t have to. You could have multiple EPGs inside one single subnet, and one of them would contain the Web servers for your specific application. Only those would be configured as pool members in your BigIP ADC.</p>
+<p><b>Third advantage</b>: and the best thing is that you can control dynamically which servers make it into the Web EPG, without having to change IP addresses or port-group assignments in the case of vSphere VMs. You could match on attributes like VM name, or Linux container IP or MAC addresses, to opt-in or opt-out servers to your web server pool. In the video below, I am showing how to remove a server dynamically from the web pool just by changing its VM name, maybe because it needs to go through some maintenance, or because it has been compromised (in this latter case, the action could have even been performed automatically by a security threat detection technology such as Cisco Advanced Malware Protection, <a href="https://www.cisco.com/go/amp">https://www.cisco.com/go/amp</a>).</p>
+<p><b>Fourth advantage</b>: Last but not least, you have all your config in one single place: from your firewall rules to the health checks you use in your load balancer. This can come handy in some situations, like security audits (only one document to give to your auditor), or config snapshots and rollbacks. And surprise, surprise, you can see this in the video below too.</p>
+<figure class="tmblr-embed tmblr-full">[youtube https://www.youtube.com/watch?v=HliRPt9ikbc?feature=oembed&amp;enablejsapi=1&amp;origin=https://safe.txmblr.com&amp;wmode=opaque&amp;w=540&amp;h=405]</figure>
+<p>Thanks for reading, I hope I could give you a glimpse of the benefits of Cisco ACI service insertion from an automation perspective!</p>

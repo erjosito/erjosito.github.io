@@ -1,0 +1,55 @@
+---
+layout: post
+title: Azure Service Map REST API samples
+date: 2019-03-01 15:41:45.000000000 +01:00
+type: post
+parent_id: '0'
+published: true
+password: ''
+status: publish
+categories:
+- arm
+- azure
+tags:
+- adm
+- application dependency mapping
+- azure migrate
+- azure monitor
+- rest api
+- service map
+meta:
+  _wpas_done_20548370: '1'
+  _thumbnail_id: '1727'
+  _publicize_done_external: a:1:{s:7:"twitter";a:1:{i:14855412;s:55:"https://twitter.com/erjosito/status/1101492732529389569";}}
+  _rest_api_published: '1'
+  _rest_api_client_id: "-1"
+  _publicize_job_id: '28163205396'
+  timeline_notification: '1551451305'
+  _publicize_done_14974324: '1'
+  _wpas_done_14855412: '1'
+  publicize_twitter_user: erjosito
+  publicize_linkedin_url: www.linkedin.com/updates?topic=6507258425041264641
+  _publicize_done_20423206: '1'
+author:
+  login: erjosito
+  email: erjosito@hotmail.com
+  display_name: erjosito
+  first_name: ''
+  last_name: ''
+permalink: "/2019/03/01/azure-service-map-rest-api-samples/"
+---
+<p>You probably know what <a href="https://azuremarketplace.microsoft.com/en-us/marketplace/apps/Microsoft.ServiceMapOMS?tab=Overview">Azure Service Map</a> is: a service that can analyze traffic in your data center and display application dependencies. This can be extremely useful for different purposes, such as deciding which VMs can be moved to the public cloud, and in which order.</p>
+<p>This picture shows a screenshot of the type of analysis you can do with Azure Service Map:</p>
+<p><img class="alignnone size-full wp-image-1728" src="{{ site.baseurl }}/assets/images/servicemap_screenshot.png" alt="servicemap_screenshot" width="533" height="324" /></p>
+<p>At the time of this writing, there is no SDK to Azure Service Map, but there are some REST APIs. Unfortunately, the <a href="https://docs.microsoft.com/rest/api/servicemap/">Service Map REST API Reference documentation </a>is not too rich in examples, so I compiled a <a href="https://github.com/erjosito/service-map-rest-samples/blob/master/AzureServiceMap.postman_collection.json">Postman library</a> and a <a href="https://github.com/erjosito/service-map-rest-samples/blob/master/ServiceMap-REST-samples.ps1">Powershell script </a>with sample code that demonstrates how to use Azure Service Map REST API.</p>
+<p>The <a href="https://www.getpostman.com/">Postman </a>library is designed to be used with Postman "environments": you can define a new environment, configure the variables used in the API calls (SubscriptionId, TenantId, etc) and you are ready to rumble. If you did not know Postman but you are working with REST APIs, you have just found something to do for this evening.</p>
+<p>The PowerShell script is similar: at the beginning, you have a section where you can define the specifics of your environment, and following it you will find a series of code snippets that perform different tasks.</p>
+<p>Regarding the API itself, the authentication is using</p>
+<p>The examples cover:</p>
+<ul>
+<li>Authentication (using a service principal)</li>
+<li>Listing virtual machines reporting information to Service Map</li>
+<li>Listing VM groups configured in Service Map</li>
+<li>Adding VMs to VM groups</li>
+</ul>
+<p>Have fun with Azure Service Map!</p>

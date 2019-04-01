@@ -1,0 +1,61 @@
+---
+layout: post
+title: Are ACI and NSX complementary solutions?
+date: 2016-06-10 07:26:00.000000000 +02:00
+type: post
+parent_id: '0'
+published: true
+password: ''
+status: publish
+categories: []
+tags:
+- cisco
+- ciscoaci
+- microsegmentation
+- network
+- nexus9000
+- nsx
+- sdn
+- vmware
+- vmwarensx
+meta:
+  tumblr_erjosito_permalink: http://erjosito.tumblr.com/post/145698499432/are-aci-and-nsx-complementary-solutions
+  tumblr_erjosito_id: '145698499432'
+  _wp_old_slug: '145698499432'
+author:
+  login: erjosito
+  email: erjosito@hotmail.com
+  display_name: erjosito
+  first_name: ''
+  last_name: ''
+permalink: "/2016/06/10/are-aci-and-nsx-complementary-solutions/"
+---
+<p>Lately there seems to be a lot of buzz in the press about combining Cisco ACI and VMware NSX to achieve a comprehensive SDN solution. Nothing bad with that, other than it creates some times the perception that NSX and ACI need themselves mutually. And hence this post, since I disagree with this perspective.</p>
+<p>First of all, the usual disclaimer: I happen to work for Cisco, but I will try to stay objective in this post. Please tell me if you don’t think I achieved that.</p>
+<p>I like to compare technology to everyday situations, so that it is easier to understand. I will use the analogy of cars and trailers in this post.</p>
+<p>Imagine you have an old network, that is imposing a lot of limitations in the way you operate your data center. You could compare it to an old car. And you are trying to solve the following problem: you need to transport big objects. What do you do? You buy a trailer.</p>
+<p><img class="alignnone size-full wp-image-886" src="{{ site.baseurl }}/assets/images/tumblr_inline_o8jns5pjo31tnwog6_1280.jpg" alt="tumblr_inline_o8jns5PJO31tnwog6_1280" width="720" height="405" /></p>
+<p>The trailer is VMware NSX. It is an add-on to your old network, that solves your problem. Now you can transport big objects. Let’s go back to the real world: what problems does NSX try to solve? After speaking to some customers, and reading documentation, these seem to be the most frequent issues that people try to address with NSX:</p>
+<ul>
+<li>Higher security, through microsegmentation and firewall integration</li>
+<li>Automation through a single API</li>
+<li>Automation through integration in vRealize Automation</li>
+<li>Ability of deploy network configurations from vCenter</li>
+<li>Interconnection of clusters separated by IP networks</li>
+</ul>
+<p>But wait a minute, are you sure that your old Trabant has enough horse powers to pull the fully loaded trailer? The same way that NSX needs a performant network (according to the design guide, a 10G/40G spine/leaf architecture is highly recommended), you might need some more power there. The performance of your overlay network will only be as good as the performance of your underlay.</p>
+<p>So chances are that you need to get a new car to successfully solve your problem anyway. What if you bought the best car/network on the planet today? If you went for Cisco ACI, you would be in a similar situation:</p>
+<p><img class="alignnone size-full wp-image-887" src="{{ site.baseurl }}/assets/images/tumblr_inline_o8jnz0yxie1tnwog6_1280.jpg" alt="tumblr_inline_o8jnz0yxiE1tnwog6_1280" width="720" height="405" /></p>
+<p>Now we are talking, this looks much better. But wait a second, your new pick-up (your new network, ACI) is now able to transport a lot of stuff! Do you still need the trailer? Let’s see what our new car is able to do on its own:</p>
+<ul>
+<li>Microsegmentation? Check</li>
+<li>Integration with next-gen firewalls? Check</li>
+<li>Centralized API? Check</li>
+<li>Configurable from vCenter? Check</li>
+<li>Integrated with vRA? Check</li>
+<li>Multiple locations interconnected by IP? Check</li>
+</ul>
+<p>And the previous goals are solved not only for the VMs in a specific hypervisor, but for multiple ones (Hyper-V, Openstack, vSphere), for bare-metal servers and Linux containers (see <a href="https://contiv.io">https://contiv.io</a>).</p>
+<p>But you will tell me: ah, but I had to spent a lot of money in the new car! What if I told you that Cisco ACI does not cost more than traditional networks? In other words:</p>
+<p><img class="alignnone size-full wp-image-888" src="{{ site.baseurl }}/assets/images/tumblr_inline_o8jo80mqi91tnwog6_1280.jpg" alt="tumblr_inline_o8jo80MQI91tnwog6_1280" width="720" height="405" /></p>
+<p>Now it is a no-brainer. You needed a new car anyway. Get ACI, which is the best value for your bucks, and it can cover all of your requirements. If you look really hard, I am sure you can find some object that does not fit in your pick-up (ACI), and maybe you can even convince yourself that that justifies buying the trailer (NSX). Be my guest, you can always attach the trailer to the pick-up. But one thing remains true: the trailer will not be able to drive without a car pulling from it.</p>

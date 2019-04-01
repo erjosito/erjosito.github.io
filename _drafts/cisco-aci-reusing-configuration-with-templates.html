@@ -1,0 +1,46 @@
+---
+layout: post
+title: 'Cisco ACI: reusing configuration with templates'
+date: 
+type: post
+parent_id: '0'
+published: false
+password: ''
+status: draft
+categories: []
+tags: []
+meta:
+  tumblr_erjosito_permalink: http://erjosito.tumblr.com/post/136607337617/cisco-aci-reusing-configuration-with-templates
+  tumblr_erjosito_id: '136607337617'
+  _wp_old_slug: '136607337617'
+author:
+  login: erjosito
+  email: erjosito@hotmail.com
+  display_name: erjosito
+  first_name: ''
+  last_name: ''
+permalink: "/"
+---
+<p>Happy New Year!</p>
+<p>In this first post I wanted to share something very simple, that every network admin does: reusing config. One quick example: do you want to configure a new VLAN interface on say VLAN 37? You check how another VLAN was configured (possibly &quot;show running interface vlan 36&quot;), store that in the word processing tool at hand (possibly Notepad), modify some parameters (possibly the VLAN number and the IP address), and copy/paste the replaced config in your network device (possibly over SSH).</p>
+<p>Does it sound familiar?</p>
+<p>The first think that is striking is the amount of times I have used the word “possibly”. Some people use Notepad, others use Word. Some will check how VLAN 36 was configured, others will check another one. Most will remember to modify the IP address, some might forget it. Most people will use SSH, in some cases you might have to use the console (with the subsequent risk of losing config in the process because of the low baud speed of the console)</p>
+<p>What is the first solution people typically adopt? Documenting best practices in text documents: this is the standard config for an OSPF process, standard config for an SVI, standard config for a physical interface, etc. Still suboptimal, since replacement, copy/paste, etc, is left for the admin to perform.</p>
+<p>What comes next? Management tools to the rescue: software like Cisco Prime Data Center Network Manager (DCNM) that supports configuration templates. Certainly a much better approach: DCNM (and other tools supporting config templates) take care of the config parametrisation (so that the user does not need to remember which values need to be replaced), and of the config deployment (so that the user does not need to copy&amp;paste into an SSH terminal).</p>
+<p>See for example this page for more information on config templates in DCNM: <a href="http://www.cisco.com/c/en/us/td/docs/switches/datacenter/sw/7_0_x/dcnm/system_mgmt/config_guide_lan/sys_mgmnt/sm_cfg_deliv_mgmt.html#pgfId-1626153">http://www.cisco.com/c/en/us/td/docs/switches/datacenter/sw/7_0_x/dcnm/system_mgmt/config_guide_lan/sys_mgmnt/sm_cfg_deliv_mgmt.html#pgfId-1626153</a></p>
+<p>Any problem with this approach? Not at all, but some people like things quick and simple, without having to install additional software. There are some tools out there that deal with this problem with CLI-based networks. A quick Google search will produce a few.</p>
+<p>The issue with these is not the tools themselves, but the underlying network, still CLI-based. Different devices with different config syntax, device-centric management (if you have 100 switches, you have potentially 100 configs to change), etc.</p>
+<p>ACI comes to the rescue here! First of all, it offers centralised network management: one config to rule them all (at least inside of the DC).</p>
+<p>Secondly: although you could certainly use CLI to send config to ACI (and thus leverage existing CLI-based tools), but real APIs are much more flexible and scalable: XML or JSON code sent over HTTPS over a RESTful API.</p>
+<p>You can extract config out of ACI mostly in one of these ways:</p>
+<ul>
+<li>Right-clicking on any object and running the “Save As” command</li>
+<li>Doing some operation on the GUI, and having the API Inspector tell you the required API calls to achieve that.</li>
+<li>Get JSON/XML code from somebody else (or from documentation)</li>
+</ul>
+<p>After working with ACI’s REST API for a while you end up pretty quickly with your own library of config templates: how to create a tenant, an application profile, an EPG, a L3-out, etc. Why not being able to parametrise those, so that they can be reused as frequently as possible, just changing the value of the parameters?</p>
+<p>This is the goal of my modify “request.py” script (download it from <a href="https://github.com/erjosito/request">https://github.com/erjosito/request</a>). It is basically a revamp of an existing script that was able to chain multiple REST config requests to ACI, now including the possibility of parametrising those requests, so that you can use them over and over again, without thinking about what values need to be modified every time.</p>
+<p>You can parametrise the JSON/XML payload, the URL and the variables themselves (recursive variables, with one level of recursion in v0.1). For ease of use, I included a textreplace.py that helps to parametrise configurations extracted out of your live system.</p>
+<p>The goal here is to have a list of config files that can be recombined and reused at will. The richer your config template library, the easier to create new configs using existing building blocks.</p>
+<p>Before you say that: I fully agree with you: configuration management tools like Ansible already do this (check this out: <a href="https://github.com/jedelman8/aci-ansible">https://github.com/jedelman8/aci-ansible</a>). Why reinventing the wheel? Because with Ansible (or for that sake, with other config management tools) you need to wait until it supports the ACI feature you want to use, whereas with this approach you just need to post standard JSON or XML code.</p>
+<p>What do you think? Useful? Or would you rather stay with CLI?</p>

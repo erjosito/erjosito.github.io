@@ -1,0 +1,42 @@
+---
+layout: post
+title: 'My first 100 days at Microsoft: the end of the (IT) world as we know it'
+date: 2017-02-11 07:12:35.000000000 +01:00
+type: post
+parent_id: '0'
+published: true
+password: ''
+status: publish
+categories:
+- azure
+tags: []
+meta:
+  _publicize_done_external: a:1:{s:7:"twitter";a:1:{i:14855412;s:54:"https://twitter.com/erjosito/status/830298471584374784";}}
+  _rest_api_published: '1'
+  _rest_api_client_id: "-1"
+  _publicize_job_id: '1734182851'
+  _publicize_done_14974324: '1'
+  _wpas_done_14855412: '1'
+  publicize_twitter_user: erjosito
+author:
+  login: erjosito
+  email: erjosito@hotmail.com
+  display_name: erjosito
+  first_name: ''
+  last_name: ''
+permalink: "/2017/02/11/my-first-100-days-at-microsoft-the-end-of-the-it-world-as-we-know-it/"
+---
+It is now about 100 days since I changed the direction of my career from the private to the public cloud, and it is time to do a small wrap up of the things I have learnt in these last few weeks, with which you might agree (or if you do not, please comment!). I will try to explain as well the reason for the melodramatic title of this post:
+
+- **This is not the Microsoft you knew 5 years ago** : I have been thoroughly surprised at the Microsoft I found, starting from the moment I did my first interview. Microsoft is approaching the cloud market very aggressively, but at the same time from a humble and open perspective. Competitors are spoken of with respect, and open source is wholeheartedly embraced. Open Source workloads on Azure is actually my main focus of activities, and to be honest, I don't remember having provisioned in Azure a single Windows VM in these first 100 days.
+- **Do-It-Yourself private clouds are doomed to failure** : if you look at the breadth of any mature public cloud portfolio (take Azure or AWS for example), you will see it goes well beyond VM-as-a-service. Products like storage, databases, communications buses, container environments, web applications, networks, file services, etc. are offered "as a service". Getting to this level of sophistication is impossible for any organization that is not ready to invest millions in software development, or buy a prepackaged solution ├á la Azure Stack. For example, if you try to mimick with say Openstack┬ájust a fraction of what Azure or AWS are already doing, you'd better start hiring a small army of Openstack engineers, you will need every single one of them.
+- **The future of IT is not IaaS** : elaborating the previous point, you might argue that IaaS is all you need, and that the rest of the public cloud portfolio is irrelevant for your organization (thus rendering the goal of a DIY on-prem cloud achievable). In my opinion, that would be a fatal mistake. Today, there are many forms to deploy an application to a public cloud such as Azure: you can create VMs and install all you need, you can configure Web Apps as a higher abstraction level, you can deploy containers, or you could just deploy code, not worrying about anything else. This latest method┬áis what the industry has dubbed "serverless computing", Microsoft knows as "Azure Functions", and Amazon as "AWS Lambda". For the app developer, the clean model of serverless computing is the future: I just upload my code, period. The cloud provider will take care about the rest. In my opinion, this is where the industry will be in some years. Now think about your private cloud efforts again.
+- **Just the core┬áfeatures is probably enough** : some of the products offered by the main public cloud providers lack features that are readily available in on-premise infrastructure. This is used by certain IT professionals as an argument to dismiss the capabilities of those cloud offerings (ever heard the "not enterprise-ready" phrase?). Note that if┬áyou are considering functionality that brings a decisive business value to organizations, that discussion is very relevant. However,┬áoften times┬áthat extra on-prem functionality is there just to work around application limitations, or to support the old way of doing things in IT. Some professionals even argue that competition among on-premises software and hardware vendors (hypervisors, network gear, storage, servers, etc) has forced them into overengineering their products. If you think about your use cases, chances are that functionality in the public cloud is enough to support them.
+- **You probably cannot manage your IT "better" than Microsoft, Google or Amazon.** ┬áThis is one important question that organizations should ask themselves. The word "better" has many implications, such as more cost-effectively, more securely or more flexibly. This also has an impact on IT professionals: if the value you give to your organization is something that gets commoditized by the public cloud (such as managing hypervisors or other infrastracture), my advise is to move your career in the direction of IT architecture, what puts you in a position that does not force you to compete with public cloud sysadmins (who tend to be┬ápretty good).
+- **Your data center might not be as secure as the public cloud**. An important implication of the previous point is IT security, since this is still an argument used by some organizations not to move workloads to the public cloud. However, looking at the success of hacking attacks everywhere around the globe (take as example the latest wave of ransomware cases), it makes me think whether organizations invest in IT security what they should. Microsoft invests every year more than $1B in cybersecurity, and has teams in place whose only focus is to detect and fix vulnerabilities in the system. What do you do to \*\*continuously\*\* improve your IT security?
+- **Hybrid cloud is here to stay** : I am not saying that everybody should dump their systems into the public cloud, since as we have seen there might be some functional requirements that can only be covered with on-premises infrastructure. As a former colleague once made me note: look at the mainframes, they are still there alive and kicking. Very few of them, but still there. I think the same will happen to cloud implementations: organizations will live with hybrid environments for the foreseeable future. Some of them will be able to completely get rid of on-premises infrastructure, others will still run some infrastructure on their own (even if it is only those die-hard mainframes).
+
+All in all, I am happy that I took the decision to disrupt myself. Even if it hasn't been easy, I am having so much fun every day that I can play with Azure and learn new stuff.
+
+Thanks for reading down to here! Do you agree with the points above? Would you add something? Would love to hear your comments!
+

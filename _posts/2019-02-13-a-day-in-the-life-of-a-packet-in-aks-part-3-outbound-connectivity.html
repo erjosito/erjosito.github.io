@@ -1,0 +1,225 @@
+---
+layout: post
+title: 'A Day in the Life of a Packet in AKS (part 3): Outbound Connectivity'
+date: 2019-02-13 00:10:36.000000000 +01:00
+type: post
+parent_id: '0'
+published: true
+password: ''
+status: publish
+categories:
+- azure
+- linux
+tags:
+- aks
+- azure load balancer
+- cni
+- kubenet
+- kubernetes
+- kubernetes networking
+meta:
+  _thumbnail_id: '1696'
+  _publicize_done_external: a:1:{s:7:"twitter";a:1:{i:14855412;s:55:"https://twitter.com/erjosito/status/1095460199920553986";}}
+  _rest_api_published: '1'
+  _rest_api_client_id: "-1"
+  _publicize_job_id: '27570596778'
+  timeline_notification: '1550013037'
+  _publicize_done_14974324: '1'
+  _wpas_done_14855412: '1'
+  publicize_twitter_user: erjosito
+  publicize_linkedin_url: www.linkedin.com/updates?topic=6501225897234833408
+  _publicize_done_20423206: '1'
+  _wpas_done_20548370: '1'
+  _wpas_skip_14855412: '1'
+  _wpas_skip_20548370: '1'
+author:
+  login: erjosito
+  email: erjosito@hotmail.com
+  display_name: erjosito
+  first_name: ''
+  last_name: ''
+permalink: "/2019/02/13/a-day-in-the-life-of-a-packet-in-aks-part-3-outbound-connectivity/"
+---
+<p>Thanks for the good feedback on this blog series! Here another set of questions I have been receiving lately: how does outbound connectivity look like for AKS pods? To answer that, we will look at how that works on both the Azure CNI and kubenet AKS clusters, deployed in one virtual network.</p>
+<p>After deploying your Azure CNI and kubenet clusters and a test VM (see <a href="https://1138blog.wordpress.com/2019/01/21/a-day-in-the-life-of-a-packet-in-azure-kubernetes-service-with-the-azure-cni/">part 1</a> and part 2 of this blog series), let us have a look first at Azure CNI.</p>
+<h2>Outbound connections for pods in Azure CNI AKS clusters</h2>
+<p>We will start with the same whereami application that we used in the <a href="https://1138blog.wordpress.com/2019/01/21/a-day-in-the-life-of-a-packet-in-azure-kubernetes-service-with-the-azure-cni/">part 1</a> of this blog series (refer to it for more details):</p>
+<pre>k apply -f ./whereami.yaml</pre>
+<p>Let us check that the pods are deployed, and that the LoadBalancer service is provisioned:</p>
+<pre>$ k get node -o wide
+NAME STATUS ROLES AGE VERSION INTERNAL-IP EXTERNAL-IP OS-IMAGE KERNEL-VERSION CONTAINER-RUNTIME
+aks-nodepool1-26711606-0 Ready agent 18m v1.11.5 10.13.76.4 &lt;none&gt; Ubuntu 16.04.5 LTS 4.15.0-1036-azure docker://3.0.1
+$
+$ k get pod -o wide
+NAME READY STATUS RESTARTS AGE IP NODE NOMINATED NODE
+whereami-564765b89-vdkjd 1/1 Running 0 11m 10.13.76.13 aks-nodepool1-26711606-0 &lt;none&gt;
+whereami-564765b89-xcvjm 1/1 Running 0 11m 10.13.76.28 aks-nodepool1-26711606-0 &lt;none&gt;
+$
+$ k get svc
+NAME TYPE CLUSTER-IP EXTERNAL-IP PORT(S) AGE
+kubernetes ClusterIP 10.0.0.1 &lt;none&gt; 443/TCP 22m
+whereami LoadBalancer 10.0.134.154 104.45.15.171 80:32188/TCP 11m</pre>
+<p>After your pods are deployed, we can start testing. First, let us look at connectivity inside of the vnet by pinging our test VM:</p>
+<pre>$ k exec whereami-564765b89-vdkjd -- ping 10.13.1.4
+PING 10.13.1.4 (10.13.1.4) 56(84) bytes of data.
+64 bytes from 10.13.1.4: icmp_seq=1 ttl=64 time=0.676 ms
+64 bytes from 10.13.1.4: icmp_seq=2 ttl=64 time=1.49 ms</pre>
+<p>10.13.1.4 is the IP address of our test VM. If you tcpdump for ICMP packets while the previous ping is running, you will see the IP address the pod is coming from:</p>
+<pre>jose@testvm:~$ sudo tcpdump -i eth0 icmp
+tcpdump: verbose output suppressed, use -v or -vv for full protocol decode
+listening on eth0, link-type EN10MB (Ethernet), capture size 262144 bytes
+22:11:58.729044 IP 10.13.76.13 &gt; testvm: ICMP echo request, id 16, seq 33, length 64
+22:11:58.729101 IP testvm &gt; 10.13.76.13: ICMP echo reply, id 16, seq 33, length 64
+22:11:59.753203 IP 10.13.76.13 &gt; testvm: ICMP echo request, id 16, seq 34, length 64
+22:11:59.753241 IP testvm &gt; 10.13.76.13: ICMP echo reply, id 16, seq 34, length 64</pre>
+<p>As expected, the pod is coming from its own IP address, and not from the node's IP.</p>
+<p>What about our public IP address when going to the Internet? Let us check with the site ifconfig.co, that returns the IP address of the visitors:</p>
+<pre>$ k exec whereami-564765b89-vdkjd -- curl -s ifconfig.co
+104.45.15.171</pre>
+<p>That IP address should look familiar, it is the one associated with the LoadBalancer service. This is interesting, because the pod it is coming from its own Azure IP configuration (where IP addresses for VMs) are defined, but still getting the LB's IP address as source when browsing to the Internet</p>
+<pre>$ noderg=$(az aks show -g $rg -n $aksname_azure --query nodeResourceGroup -o tsv)
+$ az network lb list -g $noderg --query [].[name,sku.name] -o tsv
+kubernetes Basic</pre>
+<p>Something else to notice is that the Azure Load Balancer is of the Basic type. This is especially relevant for outgoing connections, since the basic Azure Load Balancer is going to allocate a limited amount of ephemeral ports per node (1,024, as described <a href="https://docs.microsoft.com/azure/load-balancer/load-balancer-outbound-connections">here</a>). When AKS supports the standard Azure LB (in the meantime already supported on AKS-engine) this limit will disappear.</p>
+<p>What about ingress controllers? Let us enable the HTTP routing addon of AKS, and deploy an app using an ingress:</p>
+<pre>$ az aks enable-addons -a http_application_routing -g $rg -n $aksname_azure
+$ k apply -f ./whereami-ingress.yaml</pre>
+<p>If you look at all the services (since the nginx ingress controllers are deployed in kube-system), you will see two external IP addresses for LoadBalancer-type services:</p>
+<pre>$ k get svc --all-namespaces
+NAMESPACE     NAME                                                  TYPE           CLUSTER-IP     EXTERNAL-IP     PORT(S)                      AGE
+default       kubernetes                                            ClusterIP      10.0.0.1       &lt;none&gt;          443/TCP                      41m
+default       whereami                                              LoadBalancer   10.0.134.154   104.45.15.171   80:32188/TCP                 29m
+default       whereami-ingress                                      ClusterIP      10.0.82.109    &lt;none&gt;          80/TCP                       33s
+kube-system   addon-http-application-routing-default-http-backend   ClusterIP      10.0.209.122   &lt;none&gt;          80/TCP                       1m
+kube-system   addon-http-application-routing-nginx-ingress          LoadBalancer   10.0.120.136   104.46.56.131   80:31474/TCP,443:30562/TCP   1m
+kube-system   heapster                                              ClusterIP      10.0.157.125   &lt;none&gt;          80/TCP                       40m
+kube-system   kube-dns                                              ClusterIP      10.0.0.10      &lt;none&gt;          53/UDP,53/TCP                40m
+kube-system   kubernetes-dashboard                                  ClusterIP      10.0.42.100    &lt;none&gt;          80/TCP                       40m
+kube-system   metrics-server                                        ClusterIP      10.0.28.34     &lt;none&gt;          443/TCP                      40m</pre>
+<p>And we have two additional pods:</p>
+<pre>$ k get po
+NAME READY STATUS RESTARTS AGE
+whereami-564765b89-vdkjd 1/1 Running 0 31m
+whereami-564765b89-xcvjm 1/1 Running 0 31m
+whereami-ingress-7f97d7c96f-6ws82 1/1 Running 0 2m
+whereami-ingress-7f97d7c96f-qcf6p 1/1 Running 0 2m</pre>
+<p>Let's see which IP address the new pods get:</p>
+<pre>$ k exec whereami-ingress-7f97d7c96f-qcf6p -- curl -s ifconfig.co
+104.45.15.171</pre>
+<p>They get the public IP address associated to the first service! But that one does not have anything to do with the new pods. Why is that? Again, quoting <a href="https://docs.microsoft.com/en-us/azure/load-balancer/load-balancer-outbound-connections">Microsoft documentation</a>: "<em>When multiple public IP addresses are associated with Load Balancer Basic, any of these public IP addresses are a candidate for outbound flows, and one is selected at random</em>".</p>
+<h2>Outbound connectivity in Kubenet clusters</h2>
+<p>What about using kubenet? Let's do a similar deployment as the one we just did for the Azure CNI. Refer to <a href="https://1138blog.wordpress.com/2019/01/23/a-day-in-the-life-of-a-packet-in-aks-part-2-kubenet-and-ingress-controller/">part 2 </a>of this blog series for more details on how to deploy a kubenet AKS cluster in your own Vnet:</p>
+<pre>$ k config use-context kubenetcluster
+$ k apply -f ./whereami.yaml
+$ az aks enable-addons -a http_application_routing -g $rg -n $aksname_kubenet
+$ k apply -f ./whereami-ingress.yaml</pre>
+<p>Let us gather the usual information:</p>
+<pre>$ k get node -o wide
+NAME                       STATUS    ROLES     AGE       VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION      CONTAINER-RUNTIME
+aks-nodepool1-35377101-0   Ready     agent     52m       v1.11.5   10.13.77.5    &lt;none&gt;        Ubuntu 16.04.5 LTS   4.15.0-1036-azure   docker://3.0.1
+aks-nodepool1-35377101-1   Ready     agent     52m       v1.11.5   10.13.77.4    &lt;none&gt;        Ubuntu 16.04.5 LTS   4.15.0-1036-azure   docker://3.0.1
+$
+$ k get pod -o wide
+NAME                                READY     STATUS    RESTARTS   AGE       IP             NODE                       NOMINATED NODE
+whereami-564765b89-d8rdb            1/1       Running   0          4m        192.168.1.2    aks-nodepool1-35377101-1   &lt;none&gt;
+whereami-564765b89-z7p82            1/1       Running   0          4m        192.168.0.9    aks-nodepool1-35377101-0   &lt;none&gt;
+whereami-ingress-7f97d7c96f-2lqxf   1/1       Running   0          1m        192.168.0.10   aks-nodepool1-35377101-0   &lt;none&gt;
+whereami-ingress-7f97d7c96f-66vvv   1/1       Running   0          1m        192.168.1.7    aks-nodepool1-35377101-1   &lt;none&gt;
+$
+$ k get svc --all-namespaces
+NAMESPACE     NAME                                                  TYPE           CLUSTER-IP     EXTERNAL-IP       PORT(S)                      AGE
+default       kubernetes                                            ClusterIP      10.0.0.1       &lt;none&gt;            443/TCP                      56m
+default       whereami                                              LoadBalancer   10.0.58.118    137.117.164.147   80:30694/TCP                 4m
+default       whereami-ingress                                      ClusterIP      10.0.186.51    &lt;none&gt;            80/TCP                       1m
+kube-system   addon-http-application-routing-default-http-backend   ClusterIP      10.0.254.32    &lt;none&gt;            80/TCP                       3m
+kube-system   addon-http-application-routing-nginx-ingress          LoadBalancer   10.0.128.165   104.214.236.151   80:30058/TCP,443:30733/TCP   3m
+kube-system   heapster                                              ClusterIP      10.0.165.163   &lt;none&gt;            80/TCP                       56m
+kube-system   kube-dns                                              ClusterIP      10.0.0.10      &lt;none&gt;            53/UDP,53/TCP                56m
+kube-system   kubernetes-dashboard                                  ClusterIP      10.0.80.140    &lt;none&gt;            80/TCP                       56m
+kube-system   metrics-server                                        ClusterIP      10.0.45.29     &lt;none&gt;            443/TCP                      56m</pre>
+<p>Now, let's try the private IP address of the VM in the same virtual network:</p>
+<pre>$ k exec whereami-564765b89-d8rdb -- ping 10.13.1.4
+PING 10.13.1.4 (10.13.1.4) 56(84) bytes of data.
+64 bytes from 10.13.1.4: icmp_seq=1 ttl=63 time=0.617 ms
+64 bytes from 10.13.1.4: icmp_seq=2 ttl=63 time=1.75 ms
+64 bytes from 10.13.1.4: icmp_seq=3 ttl=63 time=0.797 ms</pre>
+<p>And capture traffic at the VM:</p>
+<pre>jose@testvm:~$ sudo tcpdump icmp
+tcpdump: verbose output suppressed, use -v or -vv for full protocol decode
+listening on eth0, link-type EN10MB (Ethernet), capture size 262144 bytes
+22:50:10.358307 IP <strong>10.13.77.4</strong> &gt; testvm: ICMP echo request, id 11, seq 31, length 64
+22:50:10.358320 IP testvm &gt; <strong>10.13.77.4</strong>: ICMP echo reply, id 11, seq 31, length 64</pre>
+<p>Interesting, traffic is sourced from 10.13.77.4, the IP of the node where our pod is running).</p>
+<p>Let's recheck intra-cluster communication, and do the same exercise from pod to pod. Let us start the ping from one pod to the other (note that the pods are in different nodes):</p>
+<pre>$ k exec whereami-564765b89-z7p82 -- ping 192.168.1.2
+PING 192.168.1.2 (192.168.1.2) 56(84) bytes of data.
+64 bytes from 192.168.1.2: icmp_seq=1 ttl=62 time=0.949 ms
+64 bytes from 192.168.1.2: icmp_seq=2 ttl=62 time=0.547 ms
+64 bytes from 192.168.1.2: icmp_seq=3 ttl=62 time=0.779 ms
+^C</pre>
+<p>And now let's see what we get at the other pod</p>
+<pre>$ k exec -it whereami-564765b89-d8rdb /bin/bash
+[root@whereami-564765b89-d8rdb /]# yum install -y tcpdump
+...
+Complete!
+[root@whereami-564765b89-d8rdb /]# tcpdump icmp
+tcpdump: verbose output suppressed, use -v or -vv for full protocol decode
+listening on eth0, link-type EN10MB (Ethernet), capture size 262144 bytes
+23:00:24.579482 IP<strong> 192.168.0.9</strong> &gt; whereami-564765b89-d8rdb: ICMP echo request, id 12, seq 1, length 64
+23:00:24.579511 IP whereami-564765b89-d8rdb &gt; <strong>192.168.0.9</strong>: ICMP echo reply, id 12, seq 1, length 64
+23:00:25.599114 IP <strong>192.168.0.9</strong> &gt; whereami-564765b89-d8rdb: ICMP echo request, id 12, seq 2, length 64
+23:00:25.599138 IP whereami-564765b89-d8rdb &gt; <strong>192.168.0.9</strong>: ICMP echo reply, id 12, seq 2, length 64</pre>
+<p>As you can see, no SNAT is here at play, and the pods see each other's IP addresses. How does that work? Let's have a look at our friend iptables in one of the nodes (you might need to configure ssh public keys with the Azure CLI command `​az vm update`:</p>
+<pre>jose@aks-nodepool1-35377101-0:~$ sudo iptables -t nat -vxnL POSTROUTING
+Chain POSTROUTING (policy ACCEPT 1 packets, 52 bytes)
+pkts bytes target prot opt in out source destination
+288142 18188250 KUBE-POSTROUTING all -- * * 0.0.0.0/0 0.0.0.0/0 /* kubernetes postrouting rules */
+0 0 MASQUERADE all -- * !docker0 172.17.0.0/16 0.0.0.0/0
+247724 15771644 MASQUERADE all -- * * 0.0.0.0/0 <strong>!192.168.0.0/16</strong> /* kubenet: SNAT for outbound traffic from cluster */ ADDRTYPE match dst-type !LOCAL</pre>
+<p>Mmmh, the last entry is interesting. Translated to English it would be something like "Masquerade (SNAT) all traffic coming from everywhere going to outside the pod network". This happens to be a flag you can pass to the local kubelet, called `non-masquerade-cidr`. kubelet runs in AKS as a process (not as a container), so we can have a look at it with the systemctl command (I use grep for better display in my shell, for some reason systemctl status without the grep was not breaking up the lines). I have reformatted the output in multiple lines for easier reading:</p>
+<pre>jose@aks-nodepool1-35377101-0:/etc/kubernetes$ systemctl status kubelet | grep /usr/local/bin/kubelet
+└─3668 /usr/local/bin/kubelet --enable-server 
+                              --node-labels=node-role.kubernetes.io/agent=,kubernetes.io/role=agent,agentpool=nodepool1,storageprofile=managed,storagetier=Premium_LRS,kubernetes.azure.com/cluster=MC_akstest_kubenetcluster_westeurope 
+                              --v=2 
+                              --volume-plugin-dir=/etc/kubernetes/volumeplugins 
+                              --address=0.0.0.0 
+                              --allow-privileged=true 
+                              --anonymous-auth=false  
+                              --authorization-mode=Webhook
+                              --azure-container-registry-config=/etc/kubernetes/azure.json 
+                              --cadvisor-port=0 --cgroups-per-qos=true
+                              --client-ca-file=/etc/kubernetes/certs/ca.crt
+                              --cloud-config=/etc/kubernetes/azure.json
+                              --cloud-provider=azure
+                              --cluster-dns=10.0.0.10
+                              --cluster-domain=cluster.local
+                              --enforce-node-allocatable=pods
+                              --event-qps=0
+                              --eviction-hard=memory.available&lt;100Mi,nodefs.available&lt;10%,nodefs.inodesFree&lt;5%
+                              --feature-gates=PodPriority=true
+                              --image-gc-high-threshold=85
+                              --image-gc-low-threshold=80
+                              --image-pull-progress-deadline=30m 
+                              --keep-terminated-pod-volumes=false
+                              --kube-reserved=cpu=69m,memory=1843Mi
+                              --kubeconfig=/var/lib/kubelet/kubeconfig
+                              --max-pods=110
+                              --network-plugin=kubenet
+                              --node-status-update-frequency=10s
+<strong>                              --non-masquerade-cidr=192.168.0.0/16</strong>
+                              --pod-infra-container-image=k8s.gcr.io/pause-amd64:3.1
+                              --pod-manifest-path=/etc/kubernetes/manifests
+                              --pod-max-pids=100</pre>
+<p>I was tempted to remove some lines from the previous update, but then I decided against it, since some of the options above are quite interesting (such as the max-pods limit or the kube reservations). But that is a story for another blog.</p>
+<p>Finally, let us verify the IP addresses that are visible in the public Internet, but you probably know by now what is coming:</p>
+<pre>$ k exec whereami-564765b89-d8rdb -- curl -s ifconfig.co
+137.117.164.147
+$ k exec whereami-564765b89-z7p82 -- curl -s ifconfig.co
+137.117.164.147
+$ k exec whereami-ingress-7f97d7c96f-2lqxf -- curl -s ifconfig.co
+137.117.164.147
+$ k exec whereami-ingress-7f97d7c96f-66vvv -- curl -s ifconfig.co
+137.117.164.147</pre>
+<p>As in the case of the Azure CNI cluster, the first public IP of the Azure Load Balancer is picked up for Internet communication to SNAT the pods.</p>
+<p>And hereby we conclude this chapter of this blog series, I hope you learnt something today!</p>
+<p>&nbsp;</p>

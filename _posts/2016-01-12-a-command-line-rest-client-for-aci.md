@@ -1,0 +1,56 @@
+---
+layout: post
+title: A command-line REST client for ACI
+date: 2016-01-12 11:32:45.000000000 +01:00
+type: post
+parent_id: '0'
+published: true
+password: ''
+status: publish
+categories: []
+tags:
+- aci
+- automation
+- cisco
+- ciscoaci
+- networking
+- rest
+- ucsd
+meta:
+  tumblr_erjosito_permalink: http://erjosito.tumblr.com/post/137149656822/a-command-line-rest-client-for-aci
+  tumblr_erjosito_id: '137149656822'
+  _wp_old_slug: '137149656822'
+author:
+  login: erjosito
+  email: erjosito@hotmail.com
+  display_name: erjosito
+  first_name: ''
+  last_name: ''
+permalink: "/2016/01/12/a-command-line-rest-client-for-aci/"
+---
+First of all, Happy New Year! Thanks for looking at my first post in 2016.
+
+As you might already know, Cisco ACI is a new concept of network management. In short, it is a network that brings along embedded network management functionality, that sits in a centralised controller cluster. If you want to manage a Cisco ACI network, you donÔÇÖt talk to the switches, you talk to the controller.
+
+There are a couple of interesting things about this controller. Although it offers good old CLI for network changes and show commands, you can use its GUI (either in advanced or basic mode), or the object of this post, its REST API.
+
+About this REST API in ACI there are several interesting facts that I personally like quite a bit: you can choose to use JSON or XML payload, it is thoroughly documented, and best of all, it has multiple tools that quickly help you to start rockÔÇÖnÔÇÖrolling, such as the API Inspector. This API Inspector shows you which API calls you need to send to ACI in order to accomplish any particular task that you just did using the GUI.
+
+So now you have a good library of useful REST API calls, possibly generated with the API inspector. The next step could be using a REST client to actually use them. There are multiple choices out there, like browser plugins (I use Postman for Chrome) or standalone clients (I use Paw because of its ability to ÔÇ£translateÔÇØ REST into something else like curl or Python).
+
+But I was always missing something in those clients, so I decided to create a REST client of my own. Some time ago I had seen a script called┬áÔÇ£request.pyÔÇØ, a simple script that chains multiple JSON/XML requests, and sends them to ACI. ACI credentials as well as the list of JSON/XML requests to be sent to ACI are defined in a YAML file that is provided to request.py as only parameter.
+
+What was missing? First of all: variables. If you have a REST request to create say a subnet, you want to specify the IP address as variable, so that you can reuse the same request to create multiple subnets.
+
+The next step is variable recursivity: if you create say an application called ÔÇ£ERPÔÇØ, you might want that your server groups (End Point Groups in ACI speech) ÔÇ£inheritÔÇØ the value of the application variable and are called something like ÔÇ£ERP-WebÔÇØ or ÔÇ£ERP-DatabaseÔÇØ.
+
+Another one is the possibility to specify variables inside of every request. Maybe there are variables that are valid for the whole workflow (like the tenant name), but you might want to reuse the same REST call in the same workflow mutliple times, but with different variables. For example, to create two different subnets.
+
+What is your workflow gets deployed, but it is not what you wanted? Something very important is the concept of rollback. If next to the sequence of REST calls to commit a change you specify the sequence of calls required to undo that change, you gain a lot of flexibility when falling back changes that have not been successful.
+
+And the last thing is the possibility to import the workflows into a serious orchestrator. Once you are happy with your commit and rollback REST requests, ÔÇ£request.pyÔÇØ supports generating a file that can be imported into UCS Director, containing custom tasks that can be leveraged in UCS Director workflows.
+
+Find the improved┬áÔÇ£request.pyÔÇØ along with some workflows in my GitHub repository here: [https://github.com/erjosito/request,](https://github.com/erjosito/request,) or in the ACI developer site [https://acidev.cisco.com](https://acidev.cisco.com).
+
+Do you have any idea that you would like to see in this command-line utility for ACI?
+

@@ -1,0 +1,32 @@
+---
+layout: post
+title: Using Ansible to Create and Manage Linux Workloads in Azure
+date: 
+type: post
+parent_id: '0'
+published: false
+password: ''
+status: draft
+categories: []
+tags: []
+meta:
+  _edit_last: '107159671'
+author:
+  login: erjosito
+  email: erjosito@hotmail.com
+  display_name: erjosito
+  first_name: ''
+  last_name: ''
+permalink: "/"
+---
+<p>This is an exciting post, since it is the first one I write since I joined the Microsoft team. One of the things that have surprised me is the amount of open source solutions that you can deploy effortlessly in Azure. Services ranging from a simple RHEL or Ubunto machine, to complete open source solutions such as the popular platform <a href="https://magento.com/">Magento</a>. You just need to look for them in the Azure Market Place, and chances are that you will find what you are looking for. For example, if you would like to start playing with Jenkins, you can deploy a Jenkins server in Azure without concerning yourself with the installation of the Linux operative system or the application itself.</p>
+<p>There are two questions that might be popping in your head. First, what if you don't find what you are looking for in the Market Place? And secondly: what if you need to modify the predefined service that you find in the Market Place, for example by adding additional components? A possible answer to both questions are Configuration Management Tools. If you want to install an application that you have developed yourself (and therefore it is not to be found in the Azure Market Place), you could deploy a simple Linux VM in Azure and install the application using tools like Ansible, Chef or Puppet. Or you could take a predefined service and modify it so that it exactly fit your needs. This is what I am going to describe in this post.</p>
+<p>First thing first, you need a system where you are going to control your deployments from. In my case it is a CentOS machine (hosted in Azure of course ;-). You need to install a couple of things there:</p>
+<ol>
+<li>Python (although chances are that your Linux version already has Python preinstalled)</li>
+<li>Ansible:
+<ol>
+<li>You can use installers like apt-get or yum</li>
+</ol>
+</li>
+</ol>

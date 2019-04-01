@@ -1,0 +1,94 @@
+---
+layout: post
+title: Dynamic DNS with Azure DNS (and a bash script)
+date: 2017-08-07 14:42:14.000000000 +02:00
+type: post
+parent_id: '0'
+published: true
+password: ''
+status: publish
+categories:
+- azure
+tags:
+- azure cli
+- azure dns
+- bash
+- bash automation
+- cloud
+- cloud dns
+- dns
+- dynamic dns
+- service principal
+meta:
+  _rest_api_published: '1'
+  _rest_api_client_id: "-1"
+  _thumbnail_id: '1030'
+  _wpas_skip_14855412: '1'
+  _publicize_job_id: '8001089325'
+author:
+  login: erjosito
+  email: erjosito@hotmail.com
+  display_name: erjosito
+  first_name: ''
+  last_name: ''
+permalink: "/2017/08/07/dynamic-dns-with-azure-dns-and-a-bash-script/"
+---
+<p>As you are probably aware of, DNS is one of the services offered in Azure (you can read more about it <a href="https://docs.microsoft.com/en-us/azure/dns/">here</a>, pricing <a href="https://azure.microsoft.com/en-us/pricing/details/dns/">here</a>). And as you probably know as well, you can programatically manage Azure resources over many different ways.</p>
+<p>During the weekend it struck me that I could migrate the dynamic DNS solution I had before to Azure. The process is quite simple: a script is executed from time to time, and verifies that the IP address configured for a certain FQDN is the current public IP address assigned to a connection. And it case it is not, the IP address in the name server should be updated.</p>
+<p>I was not sure whether to write a blog about this, since this is so much simpler as other stuff that people are doing out there, but I decided to go for it, because this example illustrates a couple of important things:</p>
+<ul>
+<li>This is an example of how Azure partners can offer their added value out of standard Azure services with just a bit of additional code</li>
+<li>You can (and probably should) automate anything in Azure</li>
+<li>You can use service principal authentication in your scripts limited to the resources your app needs access to (see below for more info on how to do this)</li>
+<li>You can use the Azure CLI to implement Azure automation in Linux or Mac OS X (although there are other ways like REST API, Python SDKs, etc)</li>
+</ul>
+<p>I implemented the DNS automation script with bash, leveraging Azure CLI 2.0 (you can download the script from my Github repo <a href="https://github.com/erjosito/stuff/blob/master/updateDNS.sh">here</a>). As you can see it is quite simple (other than the usual checks to verify that everything works as it should), and the Azure CLI commands to interact with the DNS recordset are intuitive enough. To remove a record (in other words, an IP address) from an A recordset:</p>
+<pre>az network dns record-set a remove-record -n $recordsetName -z $zoneName --ipv4-address $myDnsIp</pre>
+<p>And similarly, to add a new record (an IP address) to an A recordset:</p>
+<pre>az network dns record-set a add-record -n $recordsetName -z $zoneName --ipv4-address $myDnsIp</pre>
+<p>There is a point that deserves additional clarification, and that is how the script authenticates to Azure. It is using Service Principals, which ideally are created dedicated for your script. A Service Principal is a set of credentials (a GUID and a digital certificate or a password) that applications or scripts can leverage in order not to require a user to authenticate every time they run (and so that you do not have to hard code your username and password in a script). You can find more information about service principals <a href="https://docs.microsoft.com/en-us/azure/active-directory/develop/active-directory-application-objects">here</a>.</p>
+<p>In my case, I am using password authentication, my recommendation would be using digital certificates for a better security. Here the Azure CLI command that you can use to create your application credentials:</p>
+<pre><b>az ad app create --password ThisIsTheSuperSecretPassword --display-name myDynDNSapp --homepage mydyndns.com --identifier-uris mydyndns.com
+</b>{
+ "appId": "11111111-1111-1111-1111-111111111111",
+ "appPermissions": null,
+ "availableToOtherTenants": false,
+ "displayName": "myDynDNSapp",
+ "homepage": "mydyndns.com",
+ "identifierUris": [
+ "mydyndns.com"
+ ],
+ "objectId": "22222222-2222-2222-2222-222222222222",
+ "objectType": "Application",
+ "replyUrls": []
+}</pre>
+<p>You need to give a couple of URLs for the app definition, you can put there whatever you want. It is important that you write somewhere the password you specified (again, a digital certificate would have been a better idea, conceded), and the appId that has been assigned to your application, since those are the values you will need in order to authenticate to Azure. Now we need to create a service principal associated to the app. Here how you can do it:</p>
+<pre><b>az ad sp create --id 11111111-1111-1111-1111-111111111111</b>
+{
+  "appId": "11111111-1111-1111-1111-111111111111",
+  "displayName": "myDynDNSapp",
+  "objectId": "33333333-3333-3333-3333-333333333333",
+  "objectType": "ServicePrincipal",
+  "servicePrincipalNames": [
+    "11111111-1111-1111-1111-111111111111",
+    "mydyndns.com"
+  ]
+}</pre>
+<p>As you can see, you need to specify the appId as an argument to create the Service Principal. Lastly, we need to give our service principal enough privilege to modify our DNS zone (but not more). For this I will configure the default resource group of the Azure CLI to the resource group where my DNS zone has been created (in this case, I named my resource group originally "DNS"), and then assign the privilege of contributor:</p>
+<pre><strong>az configure --defaults group=DNS</strong></pre>
+<pre><b>az role assignment create --assignee 33333333-3333-3333-3333-333333333333 --role contributor</b>
+{
+  "id": "/subscriptions/&lt;your_sub_id&gt;/resourceGroups/ansiblelab/providers/Microsoft.Authorization/roleAssignments/66666666-6666-6666-6666-666666666666",
+  "name": "66666666-6666-6666-6666-666666666666",
+  "properties": {
+    "principalId": "33333333-3333-3333-3333-333333333333",
+    "roleDefinitionId": "/subscriptions/&lt;your_sub_id&gt;/providers/Microsoft.Authorization/roleDefinitions/77777777-7777-7777-7777-777777777777",
+    "scope": "/subscriptions/&lt;your_sub_id&gt;/resourceGroups/DNS"
+  },
+  "resourceGroup": "ansiblelab",
+  "type": "Microsoft.Authorization/roleAssignments"
+}</pre>
+<p>Note how the scope is only the "DNS" resource group, so that our script only has permissions to modify objects contained in that resource group.</p>
+<p>And that is basically it, now the only thing you need to do is to run your script periodically with cron in your laptop, your Linux-based home router, or somewhere else.</p>
+<p>Thanks for reading down to here, comments are very welcome!</p>
+<p>&nbsp;</p>

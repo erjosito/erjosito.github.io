@@ -1,0 +1,93 @@
+---
+layout: post
+title: Bringing together Dev and Ops with Serverless Computing  (Azure Functions)
+date: 2016-12-05 10:01:09.000000000 +01:00
+type: post
+parent_id: '0'
+published: true
+password: ''
+status: publish
+categories:
+- azure
+tags: []
+meta:
+  _publicize_done_external: a:1:{s:7:"twitter";a:1:{i:14855412;s:54:"https://twitter.com/erjosito/status/805698528001593345";}}
+  _rest_api_published: '1'
+  _rest_api_client_id: "-1"
+  _publicize_job_id: '29639728974'
+  _publicize_done_14974324: '1'
+  _wpas_done_14855412: '1'
+  publicize_twitter_user: erjosito
+author:
+  login: erjosito
+  email: erjosito@hotmail.com
+  display_name: erjosito
+  first_name: ''
+  last_name: ''
+permalink: "/2016/12/05/bringing-together-dev-and-ops-with-serverless-computing/"
+---
+<p>You might have read my <a href="https://1138blog.wordpress.com/2016/08/16/a-recipe-for-devops-apis-collaboration-analytics/">previous blog</a> on how important collaboration software can be for creating an effective DevOps culture. A couple of things have happened since I wrote that blog:</p>
+<ul>
+<li>Azure Functions make serverless computing possible in Azure</li>
+<li>Microsoft has launched Teams, more or less playing in the same category as Cisco Spark and Slack (do not expect a competitive comparison in this blog).</li>
+<li>I have a different logo on my business cards</li>
+</ul>
+<p>Out of those three,  the first one is the most crucial one, IMHO. Azure Functions allow to write code that will be executed upon a certain event. This event can be a number of different things, such as the addition of new data to Azure storage, a new version of the contents of a GitHub repository, or a generic REST call. See <a href="https://docs.microsoft.com/en-us/azure/azure-functions/functions-triggers-bindings">here</a> for more details about the triggers supported by Azure Functions.</p>
+<p>Why is this called "serverless"? Because you don't need to care about where that code is running. Whether it is a single small VM or hundreds of them running in parallel, Azure will take care of it, and charge you only by the amount of times your Azure Function is executed.</p>
+<p>What that code does upon being called can be anything. For example, it could be another REST call, maybe to post information about the event that triggered it in a collaboration tool such as Microsoft Teams.</p>
+<p>Why would you want to do that? To bridge the gap between Dev and Ops, between infrastructure admins and developers. To let developers know when infrastructure changes, and to let infrastucture admins know when code changes.</p>
+<p>So now that we know why we want to do that, let's see how. First of all I would like to acknowledge Andreas Helland's blog <a href="https://contos.io/azure-functions-and-microsoft-teams-e4a0b335dcfc">here</a> for the code on posting messages to Teams from Azure Functions.</p>
+<p>The first thing we need to do is to enable posting to a certain channel in Teams. In order to do that, you need to add a "Connector" to that channel. As you can see in this picture, I added an Incoming Webhook in my channel "Incoming" (incidentally, I called it "Bosss"):</p>
+<p><img class="alignnone size-full wp-image-286" src="{{ site.baseurl }}/assets/images/teams-adding-web-hook.png" alt="teams-adding-web-hook" width="1560" height="1368" /></p>
+<p>When you configure the Webhook, you will be given an URL where to post content in order to send messages to the Teams channel. You can test with any REST client such as Postman in order to verify that your Webhook is working. You can use this payload in your POST call:</p>
+<pre>{"text": "Hello World"}</pre>
+<p>Now all we need to do is defining an Azure Function that runs that REST call whenever something happens. Now Azure Functions are made out of two components: the trigger and the code.</p>
+<p>As trigger we will use the addition of a new blob to a storage account. You can define this using Azure's GUI, and that will generate a function.json file such as this one:</p>
+<pre>{
+    "bindings": [
+        {
+            "name": "myBlob",
+            "type": "blobTrigger",
+            "direction": "in",
+            "path": "mycontainer/{fileName}",
+            "connection": "&lt;here_goes_your_storage_account_name&gt;_STORAGE"
+        }
+    ],
+    "disabled": false
+}</pre>
+<p>Essentially, here you are binding information about the event (called "myBlob") so that it can be leveraged by the Azure Function code. In this case, whenever a blob is created in the "mycontainer" container in the specified storage account, the variable "fileName" will be passed to the Azure Function containing the blob's name.</p>
+<p>Finally, here is what the Azure Function's code looks like. Azure Functions support a number of programming languages, I am using here C#:</p>
+<pre>#r "Microsoft.WindowsAzure.Storage"
+#r "System.Web"
+#r "System.Runtime"
+#r "System.Threading.Tasks"
+#r "System.IO"
+using System;
+using System.Net.Http.Headers;
+using System.Collections.Generic;
+using System.IO;
+
+public static void Run (Stream myBlob, string fileName, TraceWriter log)
+{
+    using (var client = new HttpClient()) 
+    { 
+        client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        client.DefaultRequestHeaders.Add("User-Agent", "AzureFunctions");
+ 
+        // This is the URL from your Teams WebHook
+        var url = "https://outlook.office365.com/webhook/&lt;copy from your Teams WebHook&gt;";
+ 
+        // Build the message, send it, log it
+        var msgString = $"New blob {fileName} of {myBlob.Length} bytes";
+        StringContent msgJson = new StringContent ("{'text': '" + msgString + "'}");
+        log.Info(TeamMsg.ReadAsStringAsync().Result);
+        HttpResponseMessage response = client.PostAsync(url,msgJson).Result; 
+        var responseString = response.Content.ReadAsStringAsync().Result;
+        log.Info(responseString);
+    }
+}</pre>
+<p>As you can see the code is pretty simple, the only thing it does is some logging and sending POST calls to the URL defined in Teams with information about the event that triggered the call. The message sent looks like this:</p>
+<p><img class="alignnone size-full wp-image-319" src="{{ site.baseurl }}/assets/images/teams-boss-message.png" alt="teams-boss-message" width="1935" height="222" /></p>
+<p>What did we do? We brought information about an infrastructure change into a collaborative space such as a channel in Microsoft Teams, where developers and sysadmins can work together. Remember this is only an example, the next thing might be bringing information about a code change (for example using Github to trigger the Azure Function) to that collaborative space.</p>
+<p>This way you can put developers and sysadmins on their path for collaborative work, setting up the basis for true DevOps.</p>
+<p>&nbsp;</p>

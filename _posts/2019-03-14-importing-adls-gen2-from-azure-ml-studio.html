@@ -1,0 +1,116 @@
+---
+layout: post
+title: Importing ADLS gen2 from Azure ML Studio
+date: 2019-03-14 13:47:04.000000000 +01:00
+type: post
+parent_id: '0'
+published: true
+password: ''
+status: publish
+categories:
+- azure
+tags:
+- adls
+- azure ml
+- azure ml studio
+- data lake
+- machine learning
+- machine learning studio
+- ml studio
+meta:
+  _rest_api_client_id: "-1"
+  _publicize_job_id: '28628244747'
+  timeline_notification: '1552567625'
+  _publicize_done_external: a:1:{s:7:"twitter";a:1:{i:14855412;s:55:"https://twitter.com/erjosito/status/1106174919598137344";}}
+  _publicize_done_14974324: '1'
+  _wpas_done_14855412: '1'
+  publicize_twitter_user: erjosito
+  publicize_linkedin_url: www.linkedin.com/updates?topic=6511940612223225856
+  _publicize_done_20423206: '1'
+  _wpas_done_20548370: '1'
+  _thumbnail_id: '1732'
+  _rest_api_published: '1'
+author:
+  login: erjosito
+  email: erjosito@hotmail.com
+  display_name: erjosito
+  first_name: ''
+  last_name: ''
+permalink: "/2019/03/14/importing-adls-gen2-from-azure-ml-studio/"
+---
+<p>I recently got an interesting question: how to access data stored in Azure Data Lake Storage gen2 from Azure Machine Learning Studio?</p>
+<p>Alright, there is some stuff to unpack there. <a href="https://docs.microsoft.com/azure/storage/blobs/data-lake-storage-introduction">Azure Data Lake Storage gen2</a> is a new iteration on Azure Data Lake Storage that leverages the Azure Blob Storage engine with hierarchical addressing. The APIs are different than ADLS gen1, and somewhat different than of native Azure Blob Storage.</p>
+<p><a href="https://azure.microsoft.com/services/machine-learning-studio/">Azure Machine Learning Studio</a> has been around for a while, and it is essentially a canvas where you can use Lego-like components to create Machine Learning experiments, build ML models, and deploy those to Web Services. Even though the newer <a href="https://azure.microsoft.com/services/machine-learning-service/">Azure Machine Learning Service</a> offers more functionality (IMHO), Azure ML Studio is still used by people that would like a zero-code ML experience.</p>
+<p>So let us assume you are an Azure ML Studio user, and your data is stored in ADLS gen2. When you try to import your data in an Azure ML Studio experiment, you will find out that ADLS gen2 is not in the list of supported data sources in the "Import Dataset" component. "Azure Blob Storage" is in the list of supported data sources, but you will not be able to import ADLS gen2 data over this connector.</p>
+<p>Luckily enough, you can use Python scripts to import data as well. If you have a look at the <a href="https://docs.microsoft.com/rest/api/storageservices/data-lake-storage-gen2">REST API reference for ADLS gen2</a>, you will see that it is very close to the Azure Blob Storage API, with the authentication mechanism described in <a href="https://docs.microsoft.com/rest/api/storageservices/authorize-with-shared-key">this article called "Authorize with Shared Key"</a>.</p>
+<p>The problem is that this authentication mechanism is rather convoluted, so most people out there use other authentication schemes to access Azure Blob Storage (such as AAD authentication, recently supported). As a consequence, you will not find a lot of examples out there.</p>
+<p>Hence I decided to write this post with one example. Back to our problem, you can use an "Execute Python Script" module in Azure ML Studio. I tested the version "Anaconda 4.0/Python 3.5, with this code:</p>
+<pre>import pandas as pd
+import io
+import requests
+import datetime
+import hmac
+import hashlib
+import base64
+
+def azureml_main(dataframe1 = None, dataframe2 = None):
+  # Fill in your own variables
+  storage_account_name = ''
+  storage_account_key = ''
+  api_version = '2018-03-28'
+  request_time = datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
+  filepath='/adlsfilesystem/yourfolder/yourfile.csv'
+
+  # Object with parameters to be signed. For a Get most of them are blank, full list for reference and supportability
+  string_params = {
+    'verb': 'GET',
+    'Content-Encoding': '',
+    'Content-Language': '',
+    'Content-Length': '',
+    'Content-MD5': '',
+    'Content-Type': '',
+    'Date': '',
+    'If-Modified-Since': '',
+    'If-Match': '',
+    'If-None-Match': '',
+    'If-Unmodified-Since': '',
+    'Range': '',
+    'CanonicalizedHeaders': 'x-ms-date:' + request_time + '\nx-ms-version:' + api_version + '\n',
+    'CanonicalizedResource': '/' + storage_account_name + filepath
+  }
+  # String out of previous parameters
+  string_to_sign = (string_params['verb'] + '\n'
+    + string_params['Content-Encoding'] + '\n'
+    + string_params['Content-Language'] + '\n'
+    + string_params['Content-Length'] + '\n'
+    + string_params['Content-MD5'] + '\n'
+    + string_params['Content-Type'] + '\n'
+    + string_params['Date'] + '\n'
+    + string_params['If-Modified-Since'] + '\n'
+    + string_params['If-Match'] + '\n'
+    + string_params['If-None-Match'] + '\n'
+    + string_params['If-Unmodified-Since'] + '\n'
+    + string_params['Range'] + '\n'
+    + string_params['CanonicalizedHeaders']
+    + string_params['CanonicalizedResource'])
+  # You can uncomment the following line for some troubleshooting
+  #print('String to sign:', string_to_sign)
+  # Now we can finally build the signed string to use as authentication 
+  signed_string = base64.b64encode(hmac.new(base64.b64decode(storage_account_key), msg=string_to_sign.encode('utf-8'), digestmod=hashlib.sha256).digest()).decode()
+
+  # Let us build the HTTP GET request, starting with the HTTP headers
+  headers = {
+    'x-ms-date' : request_time,
+    'x-ms-version' : api_version,
+    'Authorization' : ('SharedKey ' + storage_account_name + ':' + signed_string)
+  }
+  # Now the URL, and let us send it out
+  url = ('https://' + storage_account_name + '.dfs.core.windows.net' + filepath) 
+  s = requests.get(url, headers = headers).content
+  c=pd.read_csv(io.StringIO(s.decode('utf-8')))
+
+  # Azure ML Studio Python module expects two outputs, hence the comma in the next line
+  return c,</pre>
+<p>I think the code is self-explanatory. The main challenge I found was in finding out how to build the signed string, since the parameters are different depending on what operation are you doing on the API. Fortunately, for a simple GET it is not too complicated.</p>
+<p>So now you have no excuse for not using ADLS gen2 from ML Studio. Have fun!</p>
+<p>&nbsp;</p>

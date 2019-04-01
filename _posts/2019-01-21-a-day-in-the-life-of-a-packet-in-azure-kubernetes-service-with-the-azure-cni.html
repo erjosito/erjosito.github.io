@@ -1,0 +1,448 @@
+---
+layout: post
+title: 'A Day in the Life of a Packet in Azure Kubernetes Service (part 1): Azure
+  CNI'
+date: 2019-01-21 12:08:38.000000000 +01:00
+type: post
+parent_id: '0'
+published: true
+password: ''
+status: publish
+categories:
+- azure
+- docker
+- linux
+tags: []
+meta:
+  _publicize_done_14974324: '1'
+  _wpas_done_14855412: '1'
+  publicize_twitter_user: erjosito
+  publicize_linkedin_url: www.linkedin.com/updates?topic=6493071670469812224
+  _publicize_done_20423206: '1'
+  _wpas_done_20548370: '1'
+  _wpas_skip_14855412: '1'
+  _wpas_skip_20548370: '1'
+  _thumbnail_id: '1696'
+  _publicize_done_external: a:1:{s:7:"twitter";a:1:{i:14855412;s:55:"https://twitter.com/erjosito/status/1087305978142441472";}}
+  _rest_api_published: '1'
+  _rest_api_client_id: "-1"
+  _publicize_job_id: '26765195813'
+  timeline_notification: '1548068919'
+author:
+  login: erjosito
+  email: erjosito@hotmail.com
+  display_name: erjosito
+  first_name: ''
+  last_name: ''
+permalink: "/2019/01/21/a-day-in-the-life-of-a-packet-in-azure-kubernetes-service-with-the-azure-cni/"
+---
+<p>I have been often troubleshooting networking inside of Azure Kubernetes Service (AKS) multiple times, so prompted by a colleague I decided to do a deep dive into the way packets are forwarded. Turned out I have learnt quite a lot! In this blog I will describe how to check every step of the way in an AKS cluster using the Azure CNI plugin (let's see if I find the time to do the same with the kubenet plugin). It is going to go pretty deep, so fasten your seat belts!</p>
+<p><a href="https://1138blog.wordpress.com/2019/01/23/a-day-in-the-life-of-a-packet-in-aks-part-2-kubenet-and-ingress-controller/">Part 2 </a>of this series focuses on the kubenet plugin (deployed to our own Vnet) and includes a scenario with an nginx ingress controller.</p>
+<h2>Getting Started</h2>
+<p>In order to test I have created an AKS cluster in a existing Vnet with advanced networking (aka Azure CNI plugin):</p>
+<pre>rg=akstest
+vnet=aksVnet
+subnet=aks
+aksname=aksPacketWalkAzure
+az group create -n $rg -l westeurope
+az network vnet create -g $rg -n $vnet --address-prefix 10.13.0.0/16 --subnet-name $subnet --subnet-prefix 10.13.76.0/24
+subnetid=$(az network vnet subnet show -g $rg --vnet-name $vnet -n $subnet --query id -o tsv)
+az aks create -g $rg -n $aksname -c 1 --generate-ssh-keys -s Standard_B2ms -k 1.11.5 --network-plugin azure --vnet-subnet-id $subnetid
+az aks get-credentials -g $rg -n $aksname</pre>
+<p>For troubleshooting we will need a VM that we will use as jump host. Let us put it in a new subnet in the same Vnet.</p>
+<pre>subnet=vmsubnet
+admin_password=$uper$ecretPassw0rd
+admin_user=lab-user
+az network vnet subnet create -g $rg-n $subnet --vnet-name $vnet --address-prefix 10.13.1.0/24
+az vm create --image ubuntults -g $rg -n testvm --admin-password $admin_password --admin-username $admin_user --public-ip-address testvm-pip --vnet-name $vnet --subnet $subnet --os-disk-size 30 --storage-sku Standard_LRS --no-wait</pre>
+<p>When the VM is ready, you will be able to SSH to its public IP address. In order to connect to the AKS nodes, you will need to generate a public/private SSH key pair. I typically use the one in my laptop, which you can add to the Kubernetes nodes:</p>
+<pre>aksname=aksPacketWalkAzure
+local_user=lab-user
+noderg=$(az aks show -g $rg -n $aksname --query nodeResourceGroup -o tsv)
+nodename=$(az vm list -g $noderg --query [0].name -o tsv)
+az vm user update -g $noderg -n $nodename --username $local_user --ssh-key-value ~/.ssh/id_rsa.pub</pre>
+<p>After having your key in the kubernetes nodes, you can connect over your jump host, for example using the -J option in ssh (see <a href="https://wiki.gentoo.org/wiki/SSH_jump_host">here </a>for more details).</p>
+<h2>Deploy an app</h2>
+<p>First thing we need to do is finding out the Resource Group where AKS infrastructure (such as the node VMs and the Load Balancers) are deployed:</p>
+<pre>aksname=aksPacketWalkAzure
+noderg=$(az aks show -g akstest -n $aksname --query nodeResourceGroup -o tsv)</pre>
+<p>I have deployed a simple service consisting of 2 pods and a LoadBalancer service:</p>
+<pre>apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: whereami
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  minReadySeconds: 5
+  template:
+    metadata:
+      labels:
+        app: whereami
+    spec:
+      containers:
+      - name: whereami
+        image: erjosito/whereami:1.3
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whereami
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+  selector:
+    app: whereami</pre>
+<p>Let's have a look at the items that have been created:</p>
+<pre>$ k get svc
+NAME         TYPE           CLUSTER-IP    EXTERNAL-IP      PORT(S)        AGE
+kubernetes   ClusterIP      10.0.0.1      &lt;none&gt;           443/TCP        24m
+whereami     LoadBalancer   <b>10.0.159.58   51.144.176.251   80:30064/TCP</b>   11m
+
+$ k get ep whereami
+NAME       ENDPOINTS                      AGE
+whereami   <b>10.13.76.26:80,10.13.76.7:80</b>   37m
+
+$ k get pod -o wide
+NAME                       READY     STATUS    RESTARTS   AGE       IP            NODE                       NOMINATED NODE
+whereami-564765b89-j7bpw   1/1       Running   0          46m       <b>10.13.76.7</b>    aks-nodepool1-31351229-0   &lt;none&gt;
+whereami-564765b89-qfq2k   1/1       Running   0          46m       <b>10.13.76.26</b>   aks-nodepool1-31351229-0   &lt;none&gt;lb=$(az network lb list -g $noderg -o tsv --query [0].name)</pre>
+<h2>Azure resources</h2>
+<p>As you can see, the service is of type LoadBalancer. That means that there should be an Azure Load Balancer in our resource group. Let's have a look at it:</p>
+<pre>lb=$(az network lb list -g $noderg -o tsv --query [0].name)
+az network lb rule list -g $noderg --lb-name $lb -o table
+BackendPort    EnableFloatingIp    EnableTcpReset    FrontendPort    IdleTimeoutInMinutes    LoadDistribution    Name                                     Protocol    ProvisioningState    ResourceGroup
+-------------  ------------------  ----------------  --------------  ----------------------  ------------------  ---------------------------------------  ----------  -------------------  ----------------------------------------
+<b>80</b>             <b>True</b>                False             80              4                       Default             a48b4c0e11cfd11e9981c7abfb60d882-TCP-80  Tcp         Succeeded            MC_akstest_aksPacketWalkAzure_westeurope
+
+az network lb probe list -g $noderg --lb-name $lb -o table
+IntervalInSeconds    Name                                     NumberOfProbes    Port    Protocol    ProvisioningState    ResourceGroup
+-------------------  ---------------------------------------  ----------------  ------  ----------  -------------------  ----------------------------------------
+5                    a48b4c0e11cfd11e9981c7abfb60d882-TCP-80  2                 <b>30064</b>   <b>Tcp</b>         Succeeded            MC_akstest_aksPacketWalkAzure_westeurope</pre>
+<p>As you can see, the probe is monitoring the NodePort's TCP port, not port 80. The probes are configured for the best supported response time: they are sent every 5 seconds, and will flag endpoints as down after 2 failures.</p>
+<p>Something important to note is the EnableFloatingIP (also known as Direct Server Return). This setting will make the load balancer not to replace the Virtual IP address with the real destination IP. This will be very relevant later.</p>
+<p>Let's verify the IP addresses (a single one in this case, since our cluster only has one node) in the backend pool:</p>
+<pre>az network lb address-pool list -g $noderg --lb-name $lb -o table
+az network lb address-pool list -g $noderg --lb-name $lb --query [].backendIpConfigurations[].id -o tsv
+/subscriptions/e7da9914-9b05-4891-893c-546cb7b0422e/resourceGroups/MC_akstest_aksPacketWalkAzure_westeurope/providers/Microsoft.Network/networkInterfaces/<b>aks-nodepool1-31351229-nic-0</b>/ipConfigurations/<b>ipconfig1</b>
+
+az network nic ip-config show -g $noderg --nic-name aks-nodepool1-31351229-nic-0 -n ipconfig1 --query privateIpAddress -o tsv
+10.13.76.4</pre>
+<h2>iptables</h2>
+<p>Alright, we know how packets arrive to the node. There they will be handled by iptables, let's have a look at the config there. At this point you need to go to your jump host, and connect to the kubernetes node:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo iptables-save | grep whereami
+-A KUBE-NODEPORTS -p tcp -m comment --comment "default/whereami:" -m tcp --dport <b>30064</b> -j KUBE-MARK-MASQ
+-A KUBE-NODEPORTS -p tcp -m comment --comment "default/whereami:" -m tcp --dport <b>30064</b> -j <b>KUBE-SVC-7G2JV7LNOR6DDNIY</b>
+-A KUBE-SERVICES -d <b>51.144.176.251/32</b> -p tcp -m comment --comment "default/whereami: loadbalancer IP" -m tcp --dport <b>80</b> -j <b>KUBE-FW-7G2JV7LNOR6DDNIY</b>
+-A KUBE-SERVICES ! -s 10.13.76.0/24 -d 10.0.159.58/32 -p tcp -m comment --comment "default/whereami: cluster IP" -m tcp <b>--dport 80</b> -j KUBE-MARK-MASQ
+-A KUBE-SERVICES -d <b>10.0.159.58/32</b> -p tcp -m comment --comment "default/whereami: <b>cluster IP</b>" -m tcp <b>--dport 80</b> -j <b>KUBE-SVC-7G2JV7LNOR6DDNIY</b>
+-A <b>KUBE-FW-7G2JV7LNOR6DDNIY</b> -m comment --comment "default/whereami: loadbalancer IP" -j KUBE-MARK-MASQ
+-A <b>KUBE-FW-7G2JV7LNOR6DDNIY</b> -m comment --comment "default/whereami: loadbalancer IP" -j <b>KUBE-SVC-7G2JV7LNOR6DDNIY</b>
+-A <b>KUBE-FW-7G2JV7LNOR6DDNIY</b> -m comment --comment "default/whereami: loadbalancer IP" -j KUBE-MARK-DROP
+-A <b>KUBE-SVC-7G2JV7LNOR6DDNIY</b> -m comment --comment "default/whereami:" -m statistic --mode random <b>--probability 0.50000000000 -j </b><b>KUBE-SEP-6HBOEI5FVFTJNRJ3</b>
+-A <b>KUBE-SVC-7G2JV7LNOR6DDNIY</b> -m comment --comment "default/whereami:" -j <b>KUBE-SEP-IJTMGMPNVALZGJZD</b>
+-A <b>KUBE-SEP-6HBOEI5FVFTJNRJ3 </b><b>-s 10.13.76.26/32</b> -m comment --comment "default/whereami:" -j KUBE-MARK-MASQ
+-A <b>KUBE-SEP-6HBOEI5FVFTJNRJ3</b> -p tcp -m comment --comment "default/whereami:" -m tcp -j <b>DNAT</b><b> --to-destination 10.13.76.26:80</b>
+-A <b>KUBE-SEP-IJTMGMPNVALZGJZD </b><b>-s 10.13.76.7/32</b> -m comment --comment "default/whereami:" -j KUBE-MARK-MASQ
+-A <b>KUBE-SEP-IJTMGMPNVALZGJZD</b> -p tcp -m comment --comment "default/whereami:" -m tcp -j <b>DNAT</b><b> --to-destination 10.13.76.7:80</b></pre>
+<p>Alright, there is a bunch to process here. Notice the first KUBE-SERVICES rule, matching on a destination IP 51.144.176.251 and port 80:</p>
+<pre>-A KUBE-SERVICES -d 51.144.176.251/32 -p tcp -m comment --comment "default/whereami: loadbalancer IP" -m tcp --dport 80 -j KUBE-FW-7G2JV7LNOR6DDNIY</pre>
+<p>Remember we said we had Floating IP, aka Direct Server Return, configured in our Azure LB rule? As a consequence, we see here the public VIP. The target of this rule is the iptables chain KUBE-SVC-7G2JV7LNOR6DDNIY. This chain has a couple of rules:</p>
+<pre>-A KUBE-FW-7G2JV7LNOR6DDNIY -m comment --comment "default/whereami: loadbalancer IP" -j KUBE-MARK-MASQ
+-A KUBE-FW-7G2JV7LNOR6DDNIY -m comment --comment "default/whereami: loadbalancer IP" -j KUBE-SVC-7G2JV7LNOR6DDNIY
+-A KUBE-FW-7G2JV7LNOR6DDNIY -m comment --comment "default/whereami: loadbalancer IP" -j KUBE-MARK-DROP</pre>
+<p>The first rule marks the packet for Masquerading (iptables naming convention for source NAT). Marking a packet is a 'non-terminating' rule in iptables. That means that further rules in the chain are processed.</p>
+<p>The second one has a target of KUBE-SVC-7G2JV7LNOR6DDNIY. Note that there is a third rule that would mark the packets to be dropped, should the previous rule not hit any terminating rule. Let's have a look at this target:</p>
+<pre>-A KUBE-SVC-7G2JV7LNOR6DDNIY -m comment --comment "default/whereami:" -m statistic --mode random --probability 0.50000000000 -j KUBE-SEP-6HBOEI5FVFTJNRJ3
+-A KUBE-SVC-7G2JV7LNOR6DDNIY -m comment --comment "default/whereami:" -j KUBE-SEP-IJTMGMPNVALZGJZD</pre>
+<p>These are the EndPoint rules, you will see here as many as endpoints in your service. Note that there is a probability associated to each endpoint, this is how iptables load balances the traffic. Finally, let's have a look at the first of those endpoint chains:</p>
+<pre>-A KUBE-SEP-6HBOEI5FVFTJNRJ3 -s 10.13.76.26/32 -m comment --comment "default/whereami:" -j KUBE-MARK-MASQ
+-A KUBE-SEP-6HBOEI5FVFTJNRJ3 -p tcp -m comment --comment "default/whereami:" -m tcp -j DNAT --to-destination 10.13.76.26:80</pre>
+<p>The first rule will mark return traffic coming from the pod to be masqueraded (NATted), the second is what actually redirects the traffic to the corresponding endpoint (pod), in this case the one with IP address 10.13.76.26.</p>
+<p>Let us have a look at what this port marking is about:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo iptables -t nat -L <b>KUBE-MARK-MASQ</b>
+Chain KUBE-MARK-MASQ (19 references)
+target     prot opt source               destination
+MARK       all  --  anywhere             anywhere             MARK or <b>0x4000</b>
+
+jose@aks-nodepool1-31351229-0:~$ sudo iptables -L -t nat -v | grep -i <b>masquerade</b>
+    0     0 MASQUERADE  all  --  any    !docker0  172.17.0.0/16        anywhere
+ 3260  203K MASQUERADE  all  --  any    any     anywhere            !10.0.0.0/8           destination IP range ! 168.63.129.16-168.63.129.16 ADDRTYPE match dst-type !LOCAL
+    4   208 MASQUERADE  all  --  any    any     anywhere             anywhere             /* kubernetes service traffic requiring SNAT */ mark match <b>0x4000</b>/<b>0x4000</b></pre>
+<p>As you can see, the KUBE-MARK-MASQ rule sets a mark doing a logical OR with 0x4000 (one bit) with the packet marking. This marking will be then checked by the masquerading to SNAT the traffic</p>
+<p>After running a connection to the VIP from your browser, let us have a look at the connection list:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo conntrack -L -d <b>51.144.176.251</b>
+tcp      6 3577 CLOSE_WAIT <b>src=109.125.120.58 dst=51.144.176.251 sport=51535</b> dport=80 <b>src=10.13.76.7 dst=</b><b>10.13.76.4</b> sport=80 dport=51535 [ASSURED] mark=0 use=1
+tcp      6 3577 CLOSE_WAIT <b>src=109.125.120.58 dst=51.144.176.251 sport=51536</b> dport=80 <b>src=10.13.76.26 dst=</b><b>10.13.76.4</b> sport=80 dport=51536 [ASSURED] mark=0 use=1
+conntrack v1.4.3 (conntrack-tools): 2 flow entries have been shown.</pre>
+<p>109.125.120.58 is the public IP on my laptop, that is the source IP of the packets. Let's take the first entry and analyze what it is saying: each flow contains two packet descriptions, one with the packet as it enters the node (before anything being translated), as well as the answer from the pod:</p>
+<ul>
+<li>Packets come in from outside with the public IP address of the client as source (109.125.120.58) and the public IP address of the VIP in the load balancer as destination (51.144.176.251, remember our discussion about floating IP aka DIrect Server Return).</li>
+<li>The pod's answer will have as source its IP address (10.13.76.7), and as destination 10.13.76.4. This is telling us that the original client's IP (109.125.120.58) is not visible to the pod, it replies to the node's address (10.13.76.4).</li>
+</ul>
+<h2>Bridges, eth and veth</h2>
+<p>If you wanted to confirm that traffic is being NATted, you could run a traffic capture on the interfaces connected to the pod. But wait, how to find out that interface? First, you need to find out a couple of things: the ID of the docker container (we will use the first one, since we have two pods), and the PID associated with it:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo docker ps | grep whereami
+<b>cd299e883674</b>        erjosito/whereami            "/bin/sh -c '/usr/sb…"   About an hour ago   Up About an hour                        k8s_whereami_whereami-564765b89-qfq2k_default_48a93ac3-1cfd-11e9-981c-7abfb60d882f_0
+64cee2b89ac6        erjosito/whereami            "/bin/sh -c '/usr/sb…"   About an hour ago   Up About an hour                        k8s_whereami_whereami-564765b89-j7bpw_default_48a73a70-1cfd-11e9-981c-7abfb60d882f_0
+jose@aks-nodepool1-31351229-0:~$ sudo docker inspect --format '{{ .State.Pid }}' <b>cd299e883674</b>
+<b>29634</b></pre>
+<p>Now you can connect to the network namespace in that PID, and run any command. Let us verify that this one has the IP address of the pod:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo nsenter -t 29634 -n ip addr
+1: lo: &lt;LOOPBACK,UP,LOWER_UP&gt; mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+19: <b>eth0@if20</b>: &lt;BROADCAST,UP,LOWER_UP&gt; mtu 1500 qdisc noqueue state UP group default qlen 1000
+    link/ether <b>ee:af:f8:66:59:bd</b> brd ff:ff:ff:ff:ff:ff link-netnsid 0
+    inet <b>10.13.76.26/24</b> scope global eth0
+       valid_lft forever preferred_lft forever</pre>
+<p>Looks good! Notice the if20 in the name of hte eth0 interface. This means that the interface is piped to interface number 20 in the node. Let us find out which one is the interface number 20:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ ip a | grep <b>20</b>:
+20: <b>azva4124965a9b</b>@if19: &lt;BROADCAST,UP,LOWER_UP&gt; mtu 1500 qdisc noqueue master azure0 state UP group default qlen 1000</pre>
+<p>There you go, if you wanted to make a packet capture of traffic entering or leaving the pod, you could run a tcpdump on interface azva4124965a9b (we will do it later in this chapter).</p>
+<p>We can do one more verification, to illustrate how networking in the Azure CNI works. For that, we need to install the brctl util, which happens to be included in the bridge-utils software package:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo apt install -y bridge-utils
+
+...
+
+jose@aks-nodepool1-31351229-0:~$ brctl show
+bridge name     bridge id               STP enabled     interfaces
+<b>azure0</b>          8000.000d3a28bd02       no              azv022045195f6
+                                                        azv1a68ecb6fb1
+                                                        azv3cd1b2db354
+                                                        azv4abdd7fa2da
+                                                        azv686acbd5570
+                                                        azv8d9152d33d2
+                                                        <b>azva4124965a9b</b>
+                                                        azvc03d8409c59
+                                                        eth0
+docker0         8000.0242406081ac       no</pre>
+<p>As you can see, we have two bridges configured in the system. One is the well known docker0 bridge. The other one is more interesting, and it is used by the Azure CNI plugin. The azure0 interface is actually where the node's IP address is configured.</p>
+<p>Bridge ports have a number, we need the port number for our azva4124965a9b interface. With that port number, we can see the MAC addresses learnt from that port:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo brctl showstp azure0 | grep azva4124965a9b
+azva4124965a9b (9)
+
+jose@aks-nodepool1-31351229-0:~$ sudo brctl showmacs azure0 | grep -E "\s+9\s+"
+  9     8a:4b:a8:d0:5c:24       yes                0.00
+  9     8a:4b:a8:d0:5c:24       yes                0.00
+  9     <b>ee:af:f8:66:59:bd</b>       no                 2.56</pre>
+<p>As you can see, the pod's MAC addresss (we saw it when connecting to its network namespace) is learnt over this bridge port, so we can be sure this is the right interface. There is another way to see the MAC address of our pod:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ ping 10.13.76.26
+PING 10.13.76.26 (10.13.76.26) 56(84) bytes of data.
+64 bytes from 10.13.76.26: icmp_seq=1 ttl=64 time=0.049 ms
+64 bytes from 10.13.76.26: icmp_seq=2 ttl=64 time=0.072 ms
+64 bytes from 10.13.76.26: icmp_seq=3 ttl=64 time=0.044 ms
+^C
+--- 10.13.76.26 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2037ms
+rtt min/avg/max/mdev = 0.044/0.055/0.072/0.012 ms
+
+jose@aks-nodepool1-31351229-0:~$ <b>arp -a</b> 10.13.76.26
+? (10.13.76.26) at <b>ee:af:f8:66:59:bd</b> [ether] PERM on <b>azure0</b></pre>
+<p>You can do captures either on eth0 (to see traffic entering/leaving the node) or on azva4124965a9b (to see traffic entering/leaving the pod). Let's capture traffic on eth0 as example:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo tcpdump -i eth0 port 80
+tcpdump: verbose output suppressed, use -v or -vv for full protocol decode
+listening on eth0, link-type EN10MB (Ethernet), capture size 262144 bytes
+23:38:56.006768 IP 10.13.76.4.50358 &gt; 168.63.129.16.http: Flags [S], seq 2243581835, win 29200, options [mss 1460,sackOK,TS val 1927742031 ecr 0,nop,wscale 7], length 0
+23:38:56.007231 IP 168.63.129.16.http &gt; 10.13.76.4.50358: Flags [S.], seq 3358221709, ack 2243581836, win 8192, options [mss 1460,nop,wscale 8,sackOK,TS val 560363995 ecr 1927742031], length 0
+23:38:56.007265 IP 10.13.76.4.50358 &gt; 168.63.129.16.http: Flags [.], ack 1, win 229, options [nop,nop,TS val 1927742031 ecr 560363995], length 0
+23:38:56.007307 IP 10.13.76.4.50358 &gt; 168.63.129.16.http: Flags [P.], seq 1:199, ack 1, win 229, options [nop,nop,TS val 1927742031 ecr 560363995], length 198: HTTP: GET /machine/?comp=goalstate HTTP/1.1
+23:38:56.008010 IP 168.63.129.16.http &gt; 10.13.76.4.50358: Flags [FP.], seq 1:2392, ack 199, win 1026, options [nop,nop,TS val 560363996 ecr 1927742031], length 2391: HTTP: HTTP/1.1 200 OK
+23:38:56.008102 IP 10.13.76.4.50358 &gt; 168.63.129.16.http: Flags [.], ack 2393, win 266, options [nop,nop,TS val 1927742032 ecr 560363996], length 0
+23:38:56.008521 IP 10.13.76.4.50358 &gt; 168.63.129.16.http: Flags [F.], seq 199, ack 2393, win 266, options [nop,nop,TS val 1927742032 ecr 560363996], length 0</pre>
+<p>As you can see, there is a lot of traffic coming from our Azure Load Balancer probes, let's filter it out in our tcpdump command:</p>
+<p>&nbsp;</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo tcpdump -n -i eth0 port 80 and not host 168.63.129.16
+tcpdump: verbose output suppressed, use -v or -vv for full protocol decode
+listening on eth0, link-type EN10MB (Ethernet), capture size 262144 bytes
+23:40:31.788475 IP 109.125.120.58.62538 &gt; <b>51.144.176.251</b>.80: Flags [S], seq 1755954558, win 64240, options [mss 1420,nop,wscale 8,nop,nop,sackOK], length 0
+23:40:31.788549 IP 51.144.176.251.80 &gt; 109.125.120.58.62538: Flags [S.], seq 1844749018, ack 1755954559, win 29200, options [mss 1460,nop,nop,sackOK,nop,wscale 7], length 0
+23:40:31.820718 IP 109.125.120.58.62538 &gt; 51.144.176.251.80: Flags [.], ack 1, win 515, length 0
+...</pre>
+<p>As before, 109.125.120.58 is my source IP. Note how the public IP is received in the interface (remember DSR aka floating IP).</p>
+<h2>externalTrafficPolicy=local</h2>
+<p>Let's try now the externalTrafficPolicy=local property of LoadBalancer-type services. This will make the source IP address visible in the pod. I have destroyed my setup, and deployed a new yaml file:</p>
+<pre>apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: whereami
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  minReadySeconds: 5
+  template:
+    metadata:
+      labels:
+        app: whereami
+    spec:
+      containers:
+      - name: whereami
+        image: erjosito/whereami:1.3
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whereami
+spec:
+  type: LoadBalancer
+  <strong>externalTrafficPolicy: "Local"</strong>
+  ports:
+  - port: 80
+  selector:
+    app: whereami</pre>
+<p>Let's have a look at the items deployed, very similar to our previous example:</p>
+<pre>$ k get svc
+NAME         TYPE           CLUSTER-IP   EXTERNAL-IP    PORT(S)        AGE
+kubernetes   ClusterIP      10.0.0.1     &lt;none&gt;         443/TCP        10h
+whereami     LoadBalancer   10.0.12.96   13.93.66.174   80:<b>32663</b>/TCP   3m
+
+$ k get ep whereami
+NAME       ENDPOINTS                       AGE
+whereami   10.13.76.15:80,10.13.76.30:80   3m</pre>
+<p>Let us check the connection table (after you generate some real traffic from your browser):</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo conntrack -L -d 13.93.66.174
+tcp      6 295 ESTABLISHED src=<b>167.220.196.180</b> dst=13.93.66.174 sport=57675 dport=80 src=10.13.76.15 dst=<b>167.220.196.180</b> sport=80 dport=57675 [ASSURED] mark=0 use=1
+tcp      6 296 ESTABLISHED src=167.220.196.180 dst=13.93.66.174 sport=38332 dport=80 src=10.13.76.30 dst=167.220.196.180 sport=80 dport=38332 [ASSURED] mark=0 use=1
+conntrack v1.4.3 (conntrack-tools): 2 flow entries have been shown.</pre>
+<p>In this case, there are two connections, both from my new source IP address 167.220.196.180 (I changed laptops in the meantime). Note however how for the return traffic (the second pair of IPs) we can see now the virtual IP not being translated.</p>
+<p>Let us double-check capturing at the pod (we did not do this in the previous section). I will take the second pod this time:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo docker ps | grep whereami
+b0370d1f082e        c8e4ff7df026                 "/bin/sh -c '/usr/sb…"   11 minutes ago      Up 11 minutes                           k8s_whereami_whereami-564765b89-jpkgg_default_96d2aa7c-1d54-11e9-981c-7abfb60d882f_0
+<b>0352b1445446</b>        c8e4ff7df026                 "/bin/sh -c '/usr/sb…"   11 minutes ago      Up 11 minutes                           k8s_whereami_whereami-564765b89-nqgz9_default_96d0d44e-1d54-11e9-981c-7abfb60d882f_0
+
+jose@aks-nodepool1-31351229-0:~$ sudo docker inspect --format '{{ .State.Pid }}' <b>0352b1445446</b>
+11232
+
+jose@aks-nodepool1-31351229-0:~$ sudo nsenter -t 11232 -n ip addr
+1: lo: &lt;LOOPBACK,UP,LOWER_UP&gt; mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+21: eth0@if<b>22</b>: &lt;BROADCAST,UP,LOWER_UP&gt; mtu 1500 qdisc noqueue state UP group default qlen 1000
+    link/ether aa:08:fc:c4:9c:f8 brd ff:ff:ff:ff:ff:ff link-netnsid 0
+    inet 10.13.76.30/24 scope global eth0
+       valid_lft forever preferred_lft forever
+
+jose@aks-nodepool1-31351229-0:~$ ip a | grep <b>22:</b>
+22: <b>azv47c3ee9d512</b>@if21: &lt;BROADCAST,UP,LOWER_UP&gt; mtu 1500 qdisc noqueue master azure0 state UP group default qlen 1000
+
+jose@aks-nodepool1-31351229-0:~$ sudo tcpdump -n -i <b>azv47c3ee9d512</b> port 80 and not host 168.63.129.16 and not host 169.254.169.254
+tcpdump: verbose output suppressed, use -v or -vv for full protocol decode
+listening on azv47c3ee9d512, link-type EN10MB (Ethernet), capture size 262144 bytes
+08:31:20.206214 IP <b>167.220.197.180</b>.13829 &gt; 10.13.76.30.80: Flags [S], seq 3186291510, win 64240, options [mss 1300,nop,wscale 8,nop,nop,sackOK], length 0
+08:31:20.206278 IP 10.13.76.30.80 &gt; 167.220.197.180.13829: Flags [S.], seq 218333007, ack 3186291511, win 29200, options [mss 1460,nop,nop,sackOK,nop,wscale 7], length 0
+08:31:20.235738 IP 167.220.197.180.13829 &gt; 10.13.76.30.80: Flags [.], ack 1, win 512, length 0</pre>
+<p>As you can see, in the capture the original IP is shown. Let us have a look at how the iptables configuration is different:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo iptables-save | grep whereami | grep KUBE-SERVICES
+-A KUBE-SERVICES ! -s 10.13.76.0/24 -d 10.0.12.96/32 -p tcp -m comment --comment "default/whereami: cluster IP" -m tcp --dport 80 -j KUBE-MARK-MASQ
+-A KUBE-SERVICES -d 10.0.12.96/32 -p tcp -m comment --comment "default/whereami: cluster IP" -m tcp --dport 80 -j KUBE-SVC-7G2JV7LNOR6DDNIY
+-A KUBE-SERVICES -d <strong>13.93.66.174/32</strong> -p tcp -m comment --comment "default/whereami: loadbalancer IP" -m tcp --dport 80 -j <b>KUBE-FW-7G2JV7LNOR6DDNIY</b></pre>
+<p>No change in the KUBE-SERVICES chain, as before no marking is done. Let us look at the target chain KUBE-FW-7G2JV7LNOR6DDNIY:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo iptables-save | grep whereami | grep KUBE-FW-7G2JV7LNOR6DDNIY
+-A <b>KUBE-FW-7G2JV7LNOR6DDNIY</b> -m comment --comment "default/whereami: loadbalancer IP" -j KUBE-XLB-7G2JV7LNOR6DDNIY
+-A <b>KUBE-FW-7G2JV7LNOR6DDNIY</b> -m comment --comment "default/whereami: loadbalancer IP" -j KUBE-MARK-DROP
+-A KUBE-SERVICES -d 13.93.66.174/32 -p tcp -m comment --comment "default/whereami: loadbalancer IP" -m tcp --dport 80 -j KUBE-FW-7G2JV7LNOR6DDNIY</pre>
+<p>As you can see in the FW rule, the KUBE-MARK-MASQ target has disappeared! This is what makes the packets not being source NATted. We have now this XLB chain, that sits before the SEP chains:</p>
+<pre>-A KUBE-XLB-7G2JV7LNOR6DDNIY -m comment --comment "Balancing rule 0 for default/whereami:" -m statistic --mode random --probability 0.50000000000 -j <strong>KUBE-SEP-SGJO6RZWDBFIJSTC</strong>
+-A KUBE-XLB-7G2JV7LNOR6DDNIY -m comment --comment "Balancing rule 1 for default/whereami:" -j <strong>KUBE-SEP-YJDPB5HJYN7OEYYV
+</strong>
+-A KUBE-SEP-SGJO6RZWDBFIJSTC -s 10.13.76.15/32 -m comment --comment "default/whereami:" -j KUBE-MARK-MASQ
+-A KUBE-SEP-SGJO6RZWDBFIJSTC -p tcp -m comment --comment "default/whereami:" -m tcp -j DNAT --to-destination 10.13.76.15:80
+-A KUBE-SEP-YJDPB5HJYN7OEYYV -s 10.13.76.30/32 -m comment --comment "default/whereami:" -j KUBE-MARK-MASQ
+-A KUBE-SEP-YJDPB5HJYN7OEYYV -p tcp -m comment --comment "default/whereami:" -m tcp -j DNAT --to-destination 10.13.76.30:80</pre>
+<p><strong><br />
+</strong>The rest of the rules do not need to change:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo iptables-save | grep MASQUERADE
+-A POSTROUTING -s 172.17.0.0/16 ! -o docker0 -j MASQUERADE
+-A POSTROUTING ! -d 10.0.0.0/8 -m iprange ! --dst-range 168.63.129.16-168.63.129.16 -m addrtype ! --dst-type LOCAL -j MASQUERADE
+-A KUBE-POSTROUTING -m comment --comment "kubernetes service traffic requiring SNAT" -m mark --mark 0x4000/0x4000 -j MASQUERADE
+
+jose@aks-nodepool1-31351229-0:~$ sudo iptables -t nat -L KUBE-MARK-MASQ
+Chain KUBE-MARK-MASQ (18 references)
+target     prot opt source               destination
+MARK       all  --  anywhere             anywhere             MARK or 0x4000
+
+jose@aks-nodepool1-31351229-0:~$ sudo iptables-save | grep MASQUERADE
+-A POSTROUTING -s 172.17.0.0/16 ! -o docker0 -j MASQUERADE
+-A POSTROUTING ! -d 10.0.0.0/8 -m iprange ! --dst-range 168.63.129.16-168.63.129.16 -m addrtype ! --dst-type LOCAL -j MASQUERADE
+-A KUBE-POSTROUTING -m comment --comment "kubernetes service traffic requiring SNAT" -m mark --mark 0x4000/0x4000 -j MASQUERADE</pre>
+<h2>The mysterious probe</h2>
+<p>Now let's have a look at the Azure load balancer. Something must be different there, since the Azure Load Balancer should only send packets to nodes containing target pods. The load balancing rule is the same:</p>
+<pre>$ az network lb rule list -g $noderg --lb-name $lb -o table
+BackendPort    EnableFloatingIp    EnableTcpReset    FrontendPort    IdleTimeoutInMinutes    LoadDistribution    Name                                     Protocol    ProvisioningState    ResourceGroup
+-------------  ------------------  ----------------  --------------  ----------------------  ------------------  ---------------------------------------  ----------  -------------------  ----------------------------------------
+<b>80</b>             <b>True</b>                False             80              4                       Default             a96e1c7f91d5411e9981c7abfb60d882-TCP-80  Tcp         Succeeded            MC_akstest_aksPacketWalkAzure_westeurope</pre>
+<p>But the probe is now a HTTP probe! And it is monitoring a TCP port completely different from the service port!</p>
+<pre>$ az network lb probe list -g $noderg --lb-name $lb -o table
+IntervalInSeconds    Name                                     NumberOfProbes    Port    Protocol    ProvisioningState    RequestPath    ResourceGroup
+-------------------  ---------------------------------------  ----------------  ------  ----------  -------------------  -------------  ----------------------------------------
+5                    a96e1c7f91d5411e9981c7abfb60d882-TCP-80  2                 <b>32364</b>   <b>Http</b>        Succeeded            <b>/healthz</b>       MC_akstest_aksPacketWalkAzure_westeurope</pre>
+<p>We can verify that the backend address pool has not changed, and that the load balancing rule is targeting the nodes' IP addresses:</p>
+<pre>$ az network lb address-pool list -g $noderg --lb-name $lb --query [].backendIpConfigurations[].id -o tsv
+/subscriptions/e7da9914-9b05-4891-893c-546cb7b0422e/resourceGroups/MC_akstest_aksPacketWalkAzure_westeurope/providers/Microsoft.Network/networkInterfaces/aks-nodepool1-31351229-nic-0/ipConfigurations/ipconfig1</pre>
+<p>But where is the port 32364 defined? And the /healthz endpoint? Let us try it out, to see what we get:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ curl localhost:32364/healthz
+{
+        "service": {
+                "namespace": "default",
+                "name": "whereami"
+        },
+        "localEndpoints": 2
+}</pre>
+<p>Interesting... However, there is no service in Kubernetes configured to answer on port 32364:</p>
+<pre>$ k get svc --all-namespaces
+NAMESPACE     NAME                   TYPE           CLUSTER-IP    EXTERNAL-IP    PORT(S)         AGE
+default       kubernetes             ClusterIP      10.0.0.1      &lt;none&gt;         443/TCP         11h
+default       whereami               LoadBalancer   10.0.12.96    13.93.66.174   80:32663/TCP    42m
+kube-system   heapster               ClusterIP      10.0.187.18   &lt;none&gt;         80/TCP          11h
+kube-system   kube-dns               ClusterIP      10.0.0.10     &lt;none&gt;         53/UDP,53/TCP   11h
+kube-system   kubernetes-dashboard   ClusterIP      10.0.103.10   &lt;none&gt;         80/TCP          11h
+kube-system   metrics-server         ClusterIP      10.0.95.138   &lt;none&gt;         443/TCP         11h</pre>
+<p>So it looks like we are going to have to find out the hard way. Let us discover which PID is listening on that port, and which Docker container is associated to that PID:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo netstat -l -p | grep 32364
+tcp6       0      0 [::]:32364              [::]:*                  LISTEN      <b>4372</b>/hyperkube
+
+jose@aks-nodepool1-31351229-0:~$ sudo docker ps -q | xargs sudo docker inspect --format '{{.State.Pid}}, {{.ID}}, {{.Name}}' | grep "^4372,"
+4372, 8d6c75b6842ed2be7cd2db6f397ce2a090492fb9603d7a687aa150b734f6ebc0, /k8s_<b>kube-proxy</b>_kube-proxy-l6th7_kube-system_007d4629-1cfc-11e9-981c-7abfb60d882f_0</pre>
+<p>Interesting, this starts to make sense: kube-proxy offers a /healthz endpoint that tells the load balancer whether there are any pods running in a particular node for a given service. This endpoint is specific to each kubernetes service. If we create a new service, for example with nginx, we will see a new probe configured in the load balance, pointing to a different TCP port served by kube-proxy:</p>
+<pre>$ k apply -f ./nginx-elb.yaml
+deployment.apps/nginx created
+service/nginx created
+
+$ az network lb probe list -g $noderg --lb-name $lb -o table
+IntervalInSeconds    Name                                     NumberOfProbes    Port    Protocol    ProvisioningState    RequestPath    ResourceGroup
+-------------------  ---------------------------------------  ----------------  ------  ----------  -------------------  -------------  ----------------------------------------
+5                    a96e1c7f91d5411e9981c7abfb60d882-TCP-80  2                 32364   Http        Updating             /healthz       MC_akstest_aksPacketWalkAzure_westeurope
+5                    a158189b11d5e11e9981c7abfb60d882-TCP-80  2                 31322   Http        Updating             /healthz       MC_akstest_aksPacketWalkAzure_westeurope
+
+jose@aks-nodepool1-31351229-0:~$ curl localhost:<b>32364</b>/healthz
+{
+        "service": {
+                "namespace": "default",
+                "name": "<strong>whereami</strong>"
+        },
+        "localEndpoints": 2
+}
+
+jose@aks-nodepool1-31351229-0:~$ curl localhost:<b>31322</b>/healthz
+{
+        "service": {
+                "namespace": "default",
+                "name": "<strong>nginx</strong>"
+        },
+        "localEndpoints": 2
+}</pre>
+<p>This concludes my investigations for today. I hope I could show you how the internal networking in AKS works, specifically with the Azure CNI plugin.</p>
+<p>&nbsp;</p>

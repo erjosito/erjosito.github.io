@@ -1,0 +1,43 @@
+---
+layout: post
+title: What should network config look like? (or the self-documenting network)
+date: 2015-08-05 06:15:21.000000000 +02:00
+type: post
+parent_id: '0'
+published: true
+password: ''
+status: publish
+categories:
+- ciscoaci
+tags: []
+meta:
+  tumblr_erjosito_permalink: http://erjosito.tumblr.com/post/125909381137/what-should-network-config-look-like-or-the
+  tumblr_erjosito_id: '125909381137'
+  _wp_old_slug: '125909381137'
+author:
+  login: erjosito
+  email: erjosito@hotmail.com
+  display_name: erjosito
+  first_name: ''
+  last_name: ''
+permalink: "/2015/08/05/what-should-network-config-look-like-or-the/"
+---
+<p>This is a question I have thinking about lately, after a customer asked me whether in Cisco ACI you can copy and paste config like in any other Cisco router or switch.</p>
+<p>Every network admin knows how to do a “show running-config”, copy a fragment of the config into a notepad, change it, and paste the new config back into the device. Or for troubleshooting, have a look at that config, that will show some hints of whether something is missing or incorrectly configured (whether just looking at the config for troubleshooting is good or bad practice is another question, I think show commands give more and more accurate info, but that is stuff for a different blog entry).</p>
+<p>These configs are easy to back-up, compare, restore and version (anybody out there still using RANCID?), and can easily be distributed.<br />
+So the question appears to be valid.</p>
+<p>Now, what is different in ACI? ACI is object-oriented, and so is its configuration. You can still save configuration as text, but it will be formatted in JSON or XML. Not as easily understood by people, but great to be processed by software. You can still get the full config (as a full config backup), or config fragments à la “show running-config interface” (most objects in the GUI support the “Save As” function). But we are still reluctant to accept those strange JSON or XML constructs as valid network config, since we are not able to read it as easily as the good old IOS config files.</p>
+<p>Let’s try to open our minds, and see what we can do with JSON/XML based config, that we couldn’t do as easily before. For example, have you ever tried to analyse a network device config with a script? I remember two cases when I tried: in the first one I wrote a Perl script to compare the config of device pairs, that should be identical except for a few lines (IP addresses basically), to find out inconsistencies. The second one is when I tried to dump network configs into a database that could be imported by a CMDB. I failed in both attempts. You could say that I am probably not a good programmer, and you would be right. Although the bottom of the problem is that those old IOS configs where not designed to be analysed and structured into objects</p>
+<p>Working with JSON or XML configs would have been much easier in both cases.<br />
+Still the question remains: “OK, but network admins and operators are not able to read network config”. There is a point there, but let’s broaden the picture a bit: actually ONLY some network admins are able to read and understand network config, and the circle grows smaller as the config complexity grows. Wouldn’t it be great having different levels of configs, that everybody could understand?</p>
+<p>So in my latest train ride back home (somewhere between 3 and 4 hours without network connectivity), I happened to have a JSON dump of a tenant config in ACI. I had a script by my colleague Camilo Rossi (thanks dude!), that dumped JSON code into Word with the Python module docx. I started to try to not only dump JSON code, but to try to “translate it” into something legible. By the time I arrived home I had a pretty decent Word document generated automatically out of the config, but still something was missing, it still was kind of hard to read.</p>
+<p>Until I figured it out: pictures. Most people are visual, and can interpret pictures much quicker than text. After a quick Google search I found the python module pydot, that allows to dynamically generate pictures, that I could include then in my Word document.</p>
+<p>Here you can see the result <a href="https://github.com/erjosito/stuff/raw/master/pod1.docx">https://github.com/erjosito/stuff/raw/master/pod1.docx</a>:<br />
+Yeah, you could include more detailed stuff, like the settings of the VRF or the BD, or the subjects and filters in the contracts, but I think it makes the point:</p>
+<ul>
+<li>Some explanation about different concepts can be included</li>
+<li>Different parameters can be correlated together (for example, the network being advertised in a L3out with the subnet configured in a BD)</li>
+<li>Pictures make it much easier to grasp at first sight</li>
+</ul>
+<p>BTW, the code is here: <a href="https://github.com/erjosito/stuff/blob/master/json2doc.py">https://github.com/erjosito/stuff/blob/master/json2doc.py</a>. This was much easier than my experiences described above (config sync, integration into CMDB/CMS) with traditional IOS-like config files. I coded the text part in around 4 hours (in the train), and put another hour for the graphs. That’s it, even for a wannabe programmer like me. That is the power of structured information conceived to be programmatically processed, as opposed to unstructured information conceived to be looked at.</p>
+<p>And this is just an example. You could generate different types of documentation: detailed docs with troubleshooting info for operators, HTML pages, overview documentation for non-technical staff, documentation focusing on a certain aspect of the config (such as security), etc. You could even generate an IOS-like config out of it, if you still wanted to. The sky is your limit now!</p>

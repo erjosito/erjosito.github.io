@@ -1,0 +1,568 @@
+---
+layout: post
+title: 'A Day in the Life of a Packet in AKS (part 2): kubenet and ingress controller'
+date: 2019-01-23 00:19:13.000000000 +01:00
+type: post
+parent_id: '0'
+published: true
+password: ''
+status: publish
+categories:
+- azure
+- linux
+tags:
+- container networking
+- containers
+- docker
+- k8s
+- kubernetes
+- kubernetes networking
+- virtual network
+- vnet
+meta:
+  _publicize_done_14974324: '1'
+  _wpas_done_14855412: '1'
+  publicize_twitter_user: erjosito
+  publicize_linkedin_url: www.linkedin.com/updates?topic=6493617920705331200
+  _publicize_done_20423206: '1'
+  _wpas_done_20548370: '1'
+  _wpas_skip_14855412: '1'
+  _wpas_skip_20548370: '1'
+  timeline_notification: '1548199154'
+  _publicize_job_id: '26821754315'
+  _thumbnail_id: '1696'
+  _publicize_done_external: a:1:{s:7:"twitter";a:1:{i:14855412;s:55:"https://twitter.com/erjosito/status/1087852223248314369";}}
+  _rest_api_published: '1'
+  _rest_api_client_id: "-1"
+author:
+  login: erjosito
+  email: erjosito@hotmail.com
+  display_name: erjosito
+  first_name: ''
+  last_name: ''
+permalink: "/2019/01/23/a-day-in-the-life-of-a-packet-in-aks-part-2-kubenet-and-ingress-controller/"
+---
+<p>Hey again, to complete the <a href="https://1138blog.wordpress.com/2019/01/21/a-day-in-the-life-of-a-packet-in-azure-kubernetes-service-with-the-azure-cni/">previous post on the Azure CNI</a>, here it goes using kubenet instead. To make it a bit more interesting we are going to explore a bunch of additional stuff:</p>
+<ul>
+<li>Deploying AKS with kubenet in your own vnet (note that this is not well documented or supported by Microsoft at the time of this writing, but it is nevertheless interesting!)</li>
+<li>Ingress controller packet walk</li>
+</ul>
+<p>&nbsp;</p>
+<h2>Deploying the cluster</h2>
+<p>Assuming you already have an existing vnet (from Part 1), you just need to create a new subnet and deploy the new cluster with the kubenet plugin. Again, note that the only option officially supported to deploy AKS in your own vnet is the Azure CNI plugin, but we want to see how this thing works. Additionally the setup with kubenet is interesting to deploy AKS clusters in subnets without a lot of address space, since the pods are not deployed inside the Vnet prefix:</p>
+<pre>rg=akstest
+aksname=aksPacketWalkKubenet
+vnet=aksVnet
+subnet=kubenet
+az network vnet <span style="font-weight:bold;">subnet create</span> -g $rg -n $subnet --vnet-name $vnet --address-prefix 10.13.77.0/24
+subnetid=$(az network vnet subnet show -g $rg --vnet-name $vnet -n $subnet --query id -o tsv)
+az aks create -g $rg -n $aksname -c 2 --generate-ssh-keys -s Standard_B2ms -k 1.11.5 --network-plugin <span style="font-weight:bold;">kubenet</span> --vnet-subnet-id $subnetid
+az aks get-credentials -g $rg -n $aksname</pre>
+<p lang="en-US">Note that we created the cluster with two nodes, since we are going to test later how inter-node communication works.</p>
+<p lang="en-US">If you already had a jump host from the previous post, you can reuse it. You will have to upload you public SSH key to both k8s nodes:</p>
+<pre style="margin:0;font-family:Consolas;font-size:11pt;">noderg=$(az aks show -g $rg -n $aksname --query nodeResourceGroup -o tsv)
+az vm user update -g $noderg -n &lt;node_name&gt; --username &lt;admin_username&gt; --ssh-key-value ~/.ssh/id_rsa.pub</pre>
+<h2>Verify cluster creation, create example app</h2>
+<p>Check that your credentials are working, and while doing that have a look at the IP addresses of your pods:</p>
+<pre>$ k get node -o wide
+NAME                       STATUS    ROLES     AGE       VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION      CONTAINER-RUNTIME
+aks-nodepool1-31351229-0   Ready     agent     23h       v1.11.5   10.13.77.4    &lt;none&gt;        Ubuntu 16.04.5 LTS   4.15.0-1035-azure   docker://3.0.1
+aks-nodepool1-31351229-1   Ready     agent     6m        v1.11.5   10.13.77.5    &lt;none&gt;        Ubuntu 16.04.5 LTS   4.15.0-1035-azure   docker://3.0.1</pre>
+<p>Now we are ready to deploy an example app. I use this file, which I named whereami.yaml:</p>
+<pre>apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: whereami
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  minReadySeconds: 5
+  template:
+    metadata:
+      labels:
+        app: whereami
+    spec:
+      containers:
+      - name: whereami
+        image: erjosito/whereami:1.3
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whereami
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+  selector:
+    app: whereami</pre>
+<p>You can deploy with this command:</p>
+<pre>k apply -f ./whereami.yaml</pre>
+<p>After a while, you will see the service with its external IP address populated (initially it will remain in Pending):</p>
+<pre>$ k get svc
+NAME         TYPE           CLUSTER-IP     EXTERNAL-IP    PORT(S)        AGE
+kubernetes   ClusterIP      10.0.0.1       &lt;none&gt;         443/TCP        22h
+whereami     LoadBalancer   10.0.223.248   23.101.73.47   80:<b>31808</b>/TCP   3m</pre>
+<p>You can see the IP address of the two endpoints (pods) associated to the service:</p>
+<pre>$ k get ep whereami
+NAME       ENDPOINTS                       AGE
+whereami   10.244.0.10:80,10.244.1.2:80   34m</pre>
+<p>Check that they are in different nodes. Otherwise, delete one of the pods, so that Kubernetes recreates it, until they are in different nodes:</p>
+<pre>$ k get pod -o wide
+NAME                       READY     STATUS    RESTARTS   AGE       IP            NODE                       NOMINATED NODE
+whereami-564765b89-g4xq5   1/1       Running   0          1m        10.244.1.2    <b>aks-nodepool1-31351229-1</b>   &lt;none&gt;
+whereami-564765b89-mx45h   1/1       Running   0          34m       10.244.0.10   <b>aks-nodepool1-31351229-0</b>   &lt;none&gt;</pre>
+<h2>Azure Load Balancer</h2>
+<p>By now you know the drill. Let us look at the load balancer in Azure:</p>
+<pre>$ lb=$(az network lb list -g $noderg -o tsv --query [0].name)
+$ az network lb rule list -g $noderg --lb-name $lb -o table
+BackendPort    EnableFloatingIp    EnableTcpReset    FrontendPort    IdleTimeoutInMinutes    LoadDistribution    Name                                     Protocol    ProvisioningState    ResourceGroup
+-------------  ------------------  ----------------  --------------  ----------------------  ------------------  ---------------------------------------  ----------  -------------------  ------------------------------------------
+<b>80</b>             <b>True</b>                False             80              4                       Default             af6ce64281dbb11e9a6ba269b1ccf60c-TCP-80  Tcp         Succeeded            MC_akstest_aksPacketWalkKubenet_westeurope</pre>
+<p>As expected, one rule with port 80, and Direct Server Return (aka Floating IP) enabled. See the <a href="https://1138blog.wordpress.com/2019/01/21/a-day-in-the-life-of-a-packet-in-azure-kubernetes-service-with-the-azure-cni/">Azure CNI blog </a>for additional details here. Let's have a look at the probe:</p>
+<pre>$ az network lb probe list -g $noderg --lb-name $lb -o table
+IntervalInSeconds    Name                                     NumberOfProbes    Port    Protocol    ProvisioningState    ResourceGroup
+-------------------  ---------------------------------------  ----------------  ------  ----------  -------------------  ------------------------------------------
+5                    af6ce64281dbb11e9a6ba269b1ccf60c-TCP-80  2                 <b>31808</b>   Tcp         Succeeded            MC_akstest_aksPacketWalkKubenet_westeurope</pre>
+<p>As with the Azure CNI plugin, the probes here are using the NodePort endpoint of the service.</p>
+<h2>eth and veth interfaces</h2>
+<p>Let us jump now to one of the nodes, and see whether there are any differences as compared to the Azure CNI plugin. You will need to go through you jump host, and connect to one of the two nodes. I have selected the first one, but as long as you have pods in both, it does not really matter.</p>
+<p>Looking at the node interfaces, you might notice the first difference: the IP address is assigned to eth0, not to azure0 as in the CNI plugin:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ ifconfig eth0
+eth0      Link encap:Ethernet  HWaddr 00:0d:3a:29:9c:bb
+          inet addr:<b>10.13.77.4</b>  Bcast:10.13.77.255  Mask:255.255.255.0
+          inet6 addr: fe80::20d:3aff:fe29:9cbb/64 Scope:Link
+          UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+          RX packets:3020483 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:2344952 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:1000
+          RX bytes:2071123015 (2.0 GB)  TX bytes:375223625 (375.2 MB)</pre>
+<p>The bridge interface, which is called here cbr0, has a different IP address, to connect to the subnet where the pods are deployed:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ ifconfig <b>cbr0</b>
+cbr0      Link encap:Ethernet  HWaddr aa:20:0e:58:7a:52
+          inet addr:<b>10.244.0.1</b>  Bcast:0.0.0.0  Mask:255.255.255.0
+          inet6 addr: fe80::a820:eff:fe58:7a52/64 Scope:Link
+          UP BROADCAST RUNNING PROMISC MULTICAST  MTU:1500  Metric:1
+          RX packets:1845245 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:1755882 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:1000
+          RX bytes:243898101 (243.8 MB)  TX bytes:1019560630 (1.0 GB)</pre>
+<p>With the Azure CNI nodes and pods share the same IP address space. With kubenet, pods are implemented in a completely separate network. The only way that nodes have to get into that pod network is through the cbr0 bridge.</p>
+<p>In order to inspect this bridge, we need to install the brctl command:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo apt install -y bridge-utils
+
+...
+
+jose@aks-nodepool1-31351229-0:~$ brctl show
+bridge name     bridge id               STP enabled     interfaces
+<b>cbr0</b>            8000.aa200e587a52       no              veth02cc98a5
+                                                        veth14f0efed
+                                                        veth30950c3b
+                                                        veth59d70255
+                                                        veth6313441d
+                                                        veth7719b83f
+                                                        veth915270d7
+                                                        vethccccd4ca
+docker0         8000.02424dfdc1f8       no</pre>
+<p>Nothing too interesting here: a bunch of veth interfaces (each of which is piped to the interface of a container), plus the well-known docker0 bridge. Let's try to find out which of these interfaces is linked to the pods of the application we deployed. We will use different methods that should yield the same result, you can pick your favorite. Let's start with the same way we used in the Azure CNI post. First, we need to find out the container ID of one of our pods:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo docker ps | grep whereami
+<strong>cbaf4a69ef18       </strong> c8e4ff7df026                 "/bin/sh -c '/usr/sb…"   36 minutes ago      Up 36 minutes                           k8s_whereami_whereami-564765b89-mx45h_default_f6b320b5-1dbb-11e9-a6ba-269b1ccf60c7_0
+fe5ef71557aa        k8s.gcr.io/pause-amd64:3.1   "/pause"                 36 minutes ago      Up 36 minutes                           k8s_POD_whereami-564765b89-mx45h_default_f6b320b5-1dbb-11e9-a6ba-269b1ccf60c7_0</pre>
+<p>With that container ID, we now go for the Process ID (PID) associated to it:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo docker inspect --format '{{ .State.Pid }}' cbaf4a69ef18
+<b>3138</b></pre>
+<p>With the process ID we can now go into the network namespace of the container:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo nsenter -t 3138 -n ip addr
+1: lo: &lt;LOOPBACK,UP,LOWER_UP&gt; mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+3: eth0@<strong>if13</strong>: &lt;BROADCAST,MULTICAST,UP,LOWER_UP&gt; mtu 1500 qdisc noqueue state UP group default
+    link/ether <b>ca:38:e3:c1:9f:49</b> brd ff:ff:ff:ff:ff:ff link-netnsid 0
+    inet <b>10.244.0.10</b>/24 scope global eth0
+       valid_lft forever preferred_lft forever</pre>
+<p>Multiple information pieces here: the container's MAC address, its IP address, and the number of the node interface where it is linked: number 13 in this case. Let's find it out:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ ip a | grep 13:
+13: <b>veth6313441d</b>@if3: &lt;BROADCAST,MULTICAST,UP,LOWER_UP&gt; mtu 1500 qdisc noqueue master cbr0 state UP group default</pre>
+<p>Let us verify that veth6313441d is indeed the traffic connected to our container, by checking that the the container's MAC address is visible through it. First we need to get the port number of that interface, for which we will use the showstp command of brctl:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo brctl showstp cbr0 | grep veth6313441d
+veth6313441d (<b>7</b>)</pre>
+<p>Now we can have a look at the MAC addresses learnt from that port:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo brctl showmacs cbr0 | grep -E "\s+7\s+"
+  7     1e:8d:fc:38:95:6e       yes                0.00
+  7     1e:8d:fc:38:95:6e       yes                0.00
+  7     <b>ca:38:e3:c1:9f:49</b>       no                 2.01</pre>
+<p>And sure enough, the third MAC entry is the one we are looking for. Just for fun, there is another method of learning which is the associated interface. I have put it on a script , in case you want to try yourself:</p>
+<pre>if [ -z "${1+x}" ]
+then
+  echo "Use: $0 &lt;container ID&gt;"
+else
+  linkid=$(sudo docker exec -it $1 bash -c 'cat /sys/class/net/eth0/iflink')
+  linkid=${linkid//[!0-9]/}
+  indexpath=$(/bin/grep -l $linkid /sys/class/net/veth*/ifindex)
+  IFS='/' read -r -a array &lt;&lt;&lt; "$indexpath"
+  ifname=${array[4]}
+  echo $ifname
+fi</pre>
+<p>For example, if you store the script above with the name getveth.sh, you can use it like this:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ ./getveth.sh cbaf4a69ef18
+veth6313441d</pre>
+<h2>Routing</h2>
+<p>One of the benefits of knowing the PID of a container is that we can run commands without having to exec into it:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo nsenter -t 3138 -n netstat -rnv
+Kernel IP routing table
+Destination     Gateway         Genmask         Flags   MSS Window  irtt Iface
+0.0.0.0         <strong>10.244.0.1</strong>      0.0.0.0         UG        0 0          0 eth0
+10.244.0.0      0.0.0.0         255.255.255.0   U         0 0          0 eth0</pre>
+<p>As you can see, the pods' default route is the cbr0 bridge, that is how it reaches the outer world. But how does the host know which containers are behind the cbr0 bridge? Easy, another route:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ netstat -rnv
+Kernel IP routing table
+Destination     Gateway         Genmask         Flags   MSS Window  irtt Iface
+0.0.0.0         10.13.77.1      0.0.0.0         UG        0 0          0 eth0
+10.13.77.0      0.0.0.0         255.255.255.0   U         0 0          0 eth0
+<b>10.244.0.0</b>      0.0.0.0         <b>255.255.255.0</b>   U         0 0          0 <b>cbr0</b>
+168.63.129.16   10.13.77.1      255.255.255.255 UGH       0 0          0 eth0
+169.254.169.254 10.13.77.1      255.255.255.255 UGH       0 0          0 eth0
+172.17.0.0      0.0.0.0         255.255.0.0     U         0 0          0 docker0</pre>
+<p>Note that the route refers to a /24 subnet. Each node has its own /24 subnet for the pods it hosts. You can find out which subnet which node has with kubectl:</p>
+<pre>$ k describe node/aks-nodepool1-31351229-0 | grep CIDR
+PodCIDR:                     <b>10.244.0.0/24</b></pre>
+<p>It is good that the node knows how to reach the pods, but will Azure know? How does Azure know which subnet is allocated to each host? Part of the AKS magic consists in defining a route-table with the corresponding subnets pointing to each host's private IP address. Let's check whether there is any route table in the node resource group:</p>
+<pre>$ az network route-table list -g $noderg -o table
+DisableBgpRoutePropagation    Location    Name                               ProvisioningState    ResourceGroup
+----------------------------  ----------  ---------------------------------  -------------------  ------------------------------------------
+False                         westeurope  <b>aks-agentpool-31351229-routetable</b>  Succeeded            MC_akstest_aksPacketWalkKubenet_westeurope</pre>
+<p>Now we know its name, let's see what routes it contains:</p>
+<pre>$ rtname=$(az network route-table list -g $noderg --query [0].name -o tsv)
+$ az network route-table route list -g $noderg --route-table-name $rtname -o table
+AddressPrefix    Name                      NextHopIpAddress    NextHopType       ProvisioningState    ResourceGroup
+---------------  ------------------------  ------------------  ----------------  -------------------  ------------------------------------------
+10.244.0.0/24    aks-nodepool1-31351229-0  10.13.77.4          VirtualAppliance  Succeeded            MC_akstest_aksPacketWalkKubenet_westeurope
+10.244.1.0/24    aks-nodepool1-31351229-1  10.13.77.5          VirtualAppliance  Succeeded            MC_akstest_aksPacketWalkKubenet_westeurope</pre>
+<p>One per host, as expected. This route needs to be applied to the subnet where the AKS nodes are. Let us have a look at all the subnets in our Vnet, and whether they have any route table attached:</p>
+<pre>$ az network vnet subnet list -g $rg --vnet-name $vnet --query [].[name,routeTable] -o tsv
+aks     None
+<b>kubenet None</b>
+vms     None</pre>
+<p>The route table is not applied to the subnet! That is because we are running here a sort of unsupported scenario: deploying kubenet-based AKS on an existing Vnet. However, there is an easy fix for this. First, let's verify that pods in different nodes cannot talk to each other, since Azure network does not know how to route the packets:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo nsenter -t 3138 -n ping 10.244.1.2
+PING 10.244.1.2 (10.244.1.2) 56(84) bytes of data.
+
+</pre>
+<p>You will not see any ICMP reply (as long as the pods are running in different nodes). If you just leave this ping running, you can use another terminal window to attach the route table to our subnet:</p>
+<pre>subnet=kubenet
+rtid=$(az network route-table list -g $noderg --query [0].id -o tsv)
+az network vnet subnet update -g $rg --vnet-name $vnet -n $subnet --route-table $rtid</pre>
+<p>After around 20 seconds ping between the containers should work, since Azure knows to which node each packet should be forwarded. The reason for this is that the pod addresses are visible into the Azure network, as opposed to other CNI plugins that obfuscate the pod addresses behind the node addresses through some kind of encapsulation (usually VXLAN).</p>
+<p>Since Azure seems to need to know how to reach the pod addresses, it does not look like there is any encapsulation at play here. Let us verify that, but capturing the ping traffic. Ping one pod from the other, and run a network capture in one of the nodes eth0 interface (these are the packets as they come and go to the network):</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo nsenter -t 3138 -n ping 10.244.1.2
+PING 10.244.1.2 (10.244.1.2) 56(84) bytes of data.
+64 bytes from 10.244.1.2: icmp_seq=1 ttl=62 time=1.00 ms
+64 bytes from 10.244.1.2: icmp_seq=2 ttl=62 time=0.901 ms                                           │
+64 bytes from 10.244.1.2: icmp_seq=3 ttl=62 time=1.07 ms
+...</pre>
+<p>Our ping is working, leave it running and run a packet capture in another terminal:</p>
+<pre>jose@aks-nodepool1-31351229-1:~$ sudo tcpdump -n -i eth0 icmp
+tcpdump: verbose output suppressed, use -v or -vv for full protocol decode
+listening on eth0, link-type EN10MB (Ethernet), capture size 262144 bytes
+21:32:32.249757 IP 10.244.0.10 &gt; 10.244.1.2: ICMP echo request, id 31592, seq 1, length 64
+21:32:32.249866 IP 10.244.1.2 &gt; 10.244.0.10: ICMP echo reply, id 31592, seq 1, length 64</pre>
+<p>Verified, kubenet is not using any network encapsulation between the nodes.</p>
+<h2>Traffic to the application</h2>
+<p>Now that we have looked at inter-node communication, let us turn our attention back to the traffic entering/leaving the cluster. As we did with the Azure CNI, let's have a look at iptables in one of the nodes, where the magic happens. You can see the relevant entries with this command:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo iptables-save | grep whereami</pre>
+<p>I will break down the output of the previous parts in multiple sections, for easier understanding. First there are some rule chains that match on traffic addressed to the  nodeport endpoint of our kubernetes service, such as the probes coming from the Azure Load Balancer:</p>
+<pre>-A KUBE-NODEPORTS -p tcp -m comment --comment "default/whereami:" -m tcp --dport <b>31808</b> -j <b>KUBE-MARK-MASQ</b>
+-A KUBE-NODEPORTS -p tcp -m comment --comment "default/whereami:" -m tcp --dport <b>31808</b> -j KUBE-SVC-7G2JV7LNOR6DDNIY</pre>
+<p>Then there are two rules that cover the cluster service, still not relevant for us:</p>
+<pre>-A KUBE-SERVICES ! -s 10.244.0.0/16 -d 10.0.223.248/32 -p tcp -m comment --comment "default/whereami: cluster IP" -m tcp --dport 80 -j KUBE-MARK-MASQ
+-A KUBE-SERVICES -d 10.0.223.248/32 -p tcp -m comment --comment "default/whereami: cluster IP" -m tcp --dport 80 -j KUBE-SVC-7G2JV7LNOR6DDNIY</pre>
+<p>When we hit the service from outside the cluster, the load balancer will send the traffic with the public IP address (remember that our rule is configured with Floating IP / Direct Server Return enabled). This is the rule we will hit:</p>
+<pre>-A KUBE-SERVICES -d 23.101.73.47/32 -p tcp -m comment --comment "default/whereami: loadbalancer IP" -m tcp <b>--dport 80</b> -j <b>KUBE-FW-7G2JV7LNOR6DDNIY</b></pre>
+<p>As you can see, the previous rule is jumping (-j) to the FW rules:</p>
+<pre>-A KUBE-FW-7G2JV7LNOR6DDNIY -m comment --comment "default/whereami: loadbalancer IP" -j KUBE-MARK-MASQ
+-A KUBE-FW-7G2JV7LNOR6DDNIY -m comment --comment "default/whereami: loadbalancer IP" -j KUBE-SVC-7G2JV7LNOR6DDNIY
+-A KUBE-FW-7G2JV7LNOR6DDNIY -m comment --comment "default/whereami: loadbalancer IP" -j KUBE-MARK-DROP</pre>
+<p>The previous rules mark the packets for SNAT (do not be surprised when you find out later that the pod does not see our real IP), and the second sends it to the SVC rules. The third rule would drop the packet, in case the SVC rules do not match:</p>
+<pre>-A KUBE-SVC-7G2JV7LNOR6DDNIY -m comment --comment "default/whereami:" -m statistic --mode random --probability 0.50000000000 -j KUBE-SEP-KFF4FJCPYGQEXMDG
+-A KUBE-SVC-7G2JV7LNOR6DDNIY -m comment --comment "default/whereami:" -j KUBE-SEP-2QV3R2JVLUZRDSSA</pre>
+<p>The previous rules jump to the Service End Point (SEP) rules, that DNAT the traffic going to each pod (rules 2 and 4 in the following output) as well as SNAT the return traffic coming from the nginx pod (rules 1 and 3) back to the public VIP:</p>
+<pre>-A KUBE-SEP-2QV3R2JVLUZRDSSA -s 10.244.1.2/32 -m comment --comment "default/whereami:" -j KUBE-MARK-MASQ
+-A KUBE-SEP-2QV3R2JVLUZRDSSA -p tcp -m comment --comment "default/whereami:" -m tcp -j DNAT --to-destination 10.244.1.2:80
+-A KUBE-SEP-KFF4FJCPYGQEXMDG -s 10.244.0.10/32 -m comment --comment "default/whereami:" -j KUBE-MARK-MASQ
+-A KUBE-SEP-KFF4FJCPYGQEXMDG -p tcp -m comment --comment "default/whereami:" -m tcp -j DNAT --to-destination 10.244.0.10:80</pre>
+<p>We mentioned above something about "marking for NAT". This is the rule that marks the packet, which is a 4-byte mark applied to the packet as it traverses different software layers through the Linux OS (search for Netfilter packet marks if you need more info about this). For example, this rule uses the first bit of the first byte (0x8 is in binary 1000) to mark a packet for later dropping.</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo iptables-save | grep '\-A KUBE-MARK-DROP'
+-A KUBE-MARK-DROP -j MARK --set-xmark <b>0x8000/0x8000</b></pre>
+<p>And here we use the second bit of the first byte (0x4 is 0100) to mark a packet for later masquerading:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo iptables-save | grep '\-A KUBE-MARK-MASQ'
+-A KUBE-MARK-MASQ -j MARK --set-xmark <b>0x4000/0x4000</b></pre>
+<p>Lastly, the KUBE-POSTROUTING chain does not match on any packet attribute, but on the mask:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo iptables-save | grep MASQUERADE
+-A POSTROUTING -s 172.17.0.0/16 ! -o docker0 -j MASQUERADE
+-A POSTROUTING ! -d 10.0.0.0/8 -m iprange ! --dst-range 168.63.129.16-168.63.129.16 -m addrtype ! --dst-type LOCAL -j MASQUERADE
+-A KUBE-POSTROUTING -m comment --comment "kubernetes service traffic requiring SNAT" -m mark <b>--mark 0x4000/0x4000</b> -j MASQUERADE</pre>
+<p>If you visit the webpage from your browser or with curl, you should be able to see a connection with the conntrack tool:</p>
+<pre>jose@aks-nodepool1-31351229-0:~$ sudo conntrack -L -d 23.101.73.47
+tcp 6 86397 ESTABLISHED src=109.125.120.58 dst=23.101.73.47 sport=62585 dport=80 src=10.244.0.10 dst=10.244.0.1 sport=80 dport=62585 [ASSURED] mark=0 use=1
+conntrack v1.4.3 (conntrack-tools): 1 flow entries have been shown.</pre>
+<p>The previous output shows that the ingress packet comes with source 109.125.120.58 (the public address of the client) and destination 23.125.120.58 (the VIP at the LB). When the return packet from the pod comes, it has source 10.244.0.10 (the pod's private IP) and destination 10.244.0.1 (the nginx pod initiates a brand new TCP connection to the backend pod using its private IP addresses).</p>
+<h2><b>HTTP Ingress Controller</b></h2>
+<p>We will not do again the exercise of configuring the externalTrafficPolicy in the service to prevent SNAT, so that the pod sees the real customer IP address (if you want to see that, you can look at my <a href="https://1138blog.wordpress.com/2019/01/21/a-day-in-the-life-of-a-packet-in-azure-kubernetes-service-with-the-azure-cni/">previous post regarding the Azure CNI</a>). Let's instead have a look at something more interesting, such as an ingress controller.</p>
+<p>In AKS you can install an nginx-based ingress controller to your cluster with a single command:</p>
+<pre>az aks enable-addons -a http_application_routing -g $rg -n $aksname</pre>
+<p>After a while, if you look at the services in the kube-system namespace you will see a couple of interesting things:</p>
+<pre>$ k -n kube-system get svc
+NAME                                                  TYPE           CLUSTER-IP     EXTERNAL-IP     PORT(S)                      AGE
+<strong>addon-http-application-routing-default-http-backend</strong>   ClusterIP      10.0.64.107    &lt;none&gt;          80/TCP                       8m
+<b>addon-http-application-routing-nginx-ingress          LoadBalancer   10.0.183.181   51.136.49.205   80:30321/TCP,443:30286/TCP   8m</b>
+heapster                                              ClusterIP      10.0.234.0     &lt;none&gt;          80/TCP                       1d
+kube-dns                                              ClusterIP      10.0.0.10      &lt;none&gt;          53/UDP,53/TCP                1d
+kubernetes-dashboard                                  ClusterIP      10.0.1.125     &lt;none&gt;          80/TCP                       1d
+metrics-server                                        ClusterIP      10.0.37.165    &lt;none&gt;          443/TCP                      1d</pre>
+<p>Other than the standard services for the right operation of the AKS cluster, you have two new ones:</p>
+<ul>
+<li>A service for the nginx-ingress of type LoadBalancer, since it needs to be reachable from the outside world</li>
+<li>A service for a default HTTP backend. This is the page that the ingress controller will show, in case it does not know the requested resource</li>
+</ul>
+<p>Since the ingress service had a LoadBalancer type, something should have happened in the Azure Load Balancer:</p>
+<pre>$ az network lb frontend-ip list -g $noderg --lb-name $lb -o table
+Name                              PrivateIpAllocationMethod    ProvisioningState    ResourceGroup
+--------------------------------  ---------------------------  -------------------  ------------------------------------------
+af6ce64281dbb11e9a6ba269b1ccf60c  Dynamic                      Succeeded            MC_akstest_aksPacketWalkKubenet_westeurope
+<b>a4c1a6c4c1e1d11e99cfe8afbff07ff3</b>  Dynamic                      Succeeded            MC_akstest_aksPacketWalkKubenet_westeurope</pre>
+<p>We see indeed a new frontend configuration, let's confirm that the associated public IP matches what we saw configured in the Kubernetes service for nginx:</p>
+<pre>$ pipid=$(az network lb frontend-ip show -g $noderg --lb-name $lb -n <b>a4c1a6c4c1e1d11e99cfe8afbff07ff3</b> --query publicIpAddress.id -o tsv)
+$ az network public-ip show --id $pipid --query ipAddress -o tsv
+<b>51.136.49.205</b></pre>
+<p>Perfect! Now that we are sure that this is the right rule, we can have a look at additional load balancing rules. They will have a similar name as the frontend IP configuration:</p>
+<pre>$ az network lb rule list -g $noderg --lb-name $lb -o table
+BackendPort    EnableFloatingIp    EnableTcpReset    FrontendPort    IdleTimeoutInMinutes    LoadDistribution    Name                                      Protocol    ProvisioningState    ResourceGroup
+-------------  ------------------  ----------------  --------------  ----------------------  ------------------  ----------------------------------------  ----------  -------------------  ------------------------------------------
+80             True                False             80              4                       Default             af6ce64281dbb11e9a6ba269b1ccf60c-TCP-80   Tcp         Succeeded            MC_akstest_aksPacketWalkKubenet_westeurope
+<b>80             True                False             80              4                       Default             a4c1a6c4c1e1d11e99cfe8afbff07ff3-TCP-80   Tcp         Succeeded            MC_akstest_aksPacketWalkKubenet_westeurope</b>
+<b>443            True                False             443             4                       Default             a4c1a6c4c1e1d11e99cfe8afbff07ff3-TCP-443  Tcp         Succeeded            MC_akstest_aksPacketWalkKubenet_westeurope</b></pre>
+<p>Two new rules, one for port 80, and another one for port 443. This is a hint that ingress controllers only work for HTTP(S) traffic. Let's have a look at the probes:</p>
+<pre>$ az network lb probe list -g $noderg --lb-name $lb -o table
+IntervalInSeconds    Name                                      NumberOfProbes    Port    Protocol    ProvisioningState    ResourceGroup                               RequestPath
+-------------------  ----------------------------------------  ----------------  ------  ----------  -------------------  ------------------------------------------  -------------
+5                    af6ce64281dbb11e9a6ba269b1ccf60c-TCP-80   2                 31808   Tcp         Succeeded            MC_akstest_aksPacketWalkKubenet_westeurope
+<b>5                    a4c1a6c4c1e1d11e99cfe8afbff07ff3-TCP-80   2                 31924   </b><b>Http</b><b>        Succeeded            MC_akstest_aksPacketWalkKubenet_westeurope  /healthz</b>
+<b>5                    a4c1a6c4c1e1d11e99cfe8afbff07ff3-TCP-443  2                 31924   </b><b>Http</b><b>        Succeeded            MC_akstest_aksPacketWalkKubenet_westeurope  /healthz</b></pre>
+<p>As usual, the probe goes to the Nodeport. There is something interesting too: the probe is of type HTTP, and goes to the /healthz path. As we saw in the Azure CNI blog post, this is a hint that externalTrafficPolicy is set to local, so that traffic will hit the nginx controllers without being NATted.</p>
+<p>You can save this configuration under the name whereami-ingress.yaml:</p>
+<pre>apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: whereami-ingress
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  minReadySeconds: 5
+  template:
+    metadata:
+      labels:
+        app: whereami-ingress
+    spec:
+      containers:
+      - name: whereami-ingress
+        image: erjosito/whereami:1.3
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whereami-ingress
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+  selector:
+    app: whereami-ingress
+---
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: whereami-ingress
+  annotations:
+    kubernetes.io/ingress.class: addon-http-application-routing
+spec:
+  rules:
+  - host: whereami-ingress.bf52096edbd84ca1b3b6.westeurope.aksapp.io
+    http:
+      paths:
+      - backend:
+          serviceName: whereami-ingress
+          servicePort: 80
+        path: /</pre>
+<p>As you can see, the config is pretty similar to the previous ones, with two major differences:</p>
+<ul>
+<li>The service is now of type ClusterIP, since it is not reachable from outside the cluster</li>
+<li>This ClusterIP service will be accessed from the ingress controller (our nginx pods). The kubernetes ingress object tells the ingress which URLs are to be mapped to the ClusterIP service.</li>
+</ul>
+<p>If you are wondering how I came up with that hostname in the ingress spec, you need to use the DNS prefix that was created along the ingress controller. You can verify it in two ways. You can look at the HTTPApplicationRoutingZoneName attribute of the cluster:</p>
+<pre>zonename=$(az aks show -g $rg -n $aksname --query addonProfiles.httpApplicationRouting.config.HTTPApplicationRoutingZoneName -o tsv)</pre>
+<p>Or you can have a look at the new DNS zone created in the node resource group:</p>
+<pre>zonename=$(az network dns zone list -g $noderg --query [0].name -o tsv)</pre>
+<p>Now you can deploy this to the cluster:</p>
+<pre>k apply -f ./whereami-ingress.yaml</pre>
+<p>Now we can see the new ingress that has been created. An ingress is a way of telling our nginx frontend how to reach our service, based either on the hostname which is passed as HTTP header, or in the path in the URL.</p>
+<pre>$ k get ingress
+NAME               HOSTS                                                        ADDRESS         PORTS     AGE
+whereami-ingress   w<b>hereami-ingress.bf52096edbd84ca1b3b6.westeurope.aksapp.io</b>   51.136.49.205   80        11m</pre>
+<p>In order for this to work, the new hostname needs to be resolvable in the public Internet. This is what the DNS Zone created in the node resource group does. If we look for A records there, we will find what we are looking for:</p>
+<pre>$ az network dns record-set a list -g $noderg -z $zonename --query [].[name,arecords[0].ipv4Address] -o tsv
+whereami-ingress        <b>51.136.49.205</b></pre>
+<p>Which is the public IP address assigned to the LoadBalancer service for our ingress controller. After a while (DNS needs some seconds/minutes to propagate over the Internet), nslookup will resolve the new name and you can browse to it (use the name, not the IP!). The generated page contains some information which is interesting for our packet walk:</p>
+<pre>$ curl -s whereami-ingress.$zonename | grep -E 'Remote address|X-Forwarded-For|Private IP address'
+         &lt;li&gt;Private IP address: <b>10.244.0.13</b>&lt;/li&gt;
+         &lt;li&gt;Remote address: <b>10.244.1.6</b>&lt;/li&gt;
+         &lt;li&gt;X-Forwarded-For HTTP header: <b>109.125.120.58</b>&lt;/li&gt;</pre>
+<p>Let's see what this means:</p>
+<ul>
+<li>The pod where we ended up has the private IP of 10.244.0.13</li>
+<li>It is seeing the packets with a source IP of 10.244.1.6, which correspond to our nginx pod. This makes sense, nginx needs to SNAT the packets so that return traffic goes through it again.</li>
+<li>Lastly, nginx was gentle enough to put the original client IP in the X-Forwarded-For HTTP header, so that we can use this information for application logging</li>
+</ul>
+<p>Let us verify the private IP address of the nginx pod, 10.244.1.6:</p>
+<pre>$ k -n kube-system get pod -o wide
+NAME                                                              READY     STATUS    RESTARTS   AGE       IP           NODE                       NOMINATED NODE
+addon-http-application-routing-default-http-backend-5ccb95flhzj   1/1       Running   0          2h        10.244.1.7   aks-nodepool1-31351229-1   &lt;none&gt;
+addon-http-application-routing-external-dns-5c8c885957-9l2jq      1/1       Running   0          2h        10.244.1.5   aks-nodepool1-31351229-1   &lt;none&gt;
+<b>addon-http-application-routing-nginx-ingress-controller-ffbbqj6</b>   1/1       Running   0          2h        <b>10.244.1.6</b>   aks-nodepool1-31351229-1   &lt;none&gt;
+heapster-5d6f9b846c-rhtbq                                         2/2       Running   0          2h        10.244.1.4   aks-nodepool1-31351229-1   &lt;none&gt;
+kube-dns-v20-7c7d7d4c66-lqgb4                                     4/4       Running   0          1d        10.244.0.6   aks-nodepool1-31351229-0   &lt;none&gt;
+kube-dns-v20-7c7d7d4c66-p2969                                     4/4       Running   0          1d        10.244.0.7   aks-nodepool1-31351229-0   &lt;none&gt;
+kube-proxy-c4mxr                                                  1/1       Running   0          2h        10.13.77.5   aks-nodepool1-31351229-1   &lt;none&gt;
+kube-proxy-djnfs                                                  1/1       Running   0          2h        10.13.77.4   aks-nodepool1-31351229-0   &lt;none&gt;
+kube-svc-redirect-j4dhd                                           2/2       Running   0          1d        10.13.77.4   aks-nodepool1-31351229-0   &lt;none&gt;
+kube-svc-redirect-njr7l                                           2/2       Running   0          13h       10.13.77.5   aks-nodepool1-31351229-1   &lt;none&gt;
+kubernetes-dashboard-68f468887f-hzx6q                             1/1       Running   1          1d        10.244.0.4   aks-nodepool1-31351229-0   &lt;none&gt;
+metrics-server-5cbc77f79f-w9psr                                   1/1       Running   1          1d        10.244.0.3   aks-nodepool1-31351229-0   &lt;none&gt;
+tunnelfront-76d5496779-nkrqp                                      1/1       Running   0          5h        10.244.1.3   aks-nodepool1-31351229-1   &lt;none&gt;</pre>
+<p>Essentially we have two flows:</p>
+<ol>
+<li>Client web browser - nginx: this communication goes through an Azure External Load Balancer. As we will verify, no SNAT is performed, so that nginx gets the real IP address of the client (the first hint at this was the HTTP-based health probe in the Azure LB, remember?)</li>
+<li>nginx - application pod: this is intra-cluster pod-to-pod communication using internal IPs</li>
+</ol>
+<p>If you analyze the iptables config for the nginx ingress controller pod, to verify the absence of NATting. I have reordered the output of the command sudo iptables-save | grep nginx for ease of read. I have selected the rules for port 80, similar rules exist for 443 too:</p>
+<p>First, the LoadBalancer service rule:</p>
+<pre>-A KUBE-SERVICES -d 51.136.49.205/32 -p tcp -m comment --comment "kube-system/addon-http-application-routing-nginx-ingress:http loadbalancer IP" -m tcp --dport 80 -j KUBE-FW-PXYKE4WDT2UXBLRE</pre>
+<p>Which jumps to the FW rules:</p>
+<pre>-A KUBE-FW-PXYKE4WDT2UXBLRE -m comment --comment "kube-system/addon-http-application-routing-nginx-ingress:http loadbalancer IP" -j KUBE-XLB-PXYKE4WDT2UXBLRE
+-A KUBE-FW-PXYKE4WDT2UXBLRE -m comment --comment "kube-system/addon-http-application-routing-nginx-ingress:http loadbalancer IP" -j KUBE-MARK-DROP</pre>
+<p>Note that packets are not marked for NAT aka masquerading. Then it jumps to:</p>
+<pre>-A KUBE-XLB-PXYKE4WDT2UXBLRE -m comment --comment "Balancing rule 0 for kube-system/addon-http-application-routing-nginx-ingress:http" -j KUBE-SEP-EVDIGAVJIJH6RX2S</pre>
+<p>No probabilities, since we only have one pod (having at least 2 would be recommended for production scenarios). Finally it jumps to the SEP rules:</p>
+<pre>-A KUBE-SEP-EVDIGAVJIJH6RX2S -s 10.244.1.6/32 -m comment --comment "kube-system/addon-http-application-routing-nginx-ingress:http" -j KUBE-MARK-MASQ
+-A KUBE-SEP-EVDIGAVJIJH6RX2S -p tcp -m comment --comment "kube-system/addon-http-application-routing-nginx-ingress:http" -m tcp -j DNAT --to-destination 10.244.1.6:80</pre>
+<p>For traffic to the pod, DNAT LB VIP to pod's address (2nd entry). For traffic from the pod, mark for SNAT to the LB VIP (1st entry).</p>
+<p>If we get into the nginx pod, we can get the configuration that has been injected to it. You can find more info about the nginx ingress troubleshooting <a href="https://kubernetes.github.io/ingress-nginx/troubleshooting/">here</a>.</p>
+<pre>k -n kube-system exec -it addon-http-application-routing-nginx-ingress-controller-ffbbqj6 cat /etc/nginx/nginx.conf</pre>
+<p>I will put a fragment of the configuration here:</p>
+<pre>        upstream upstream_balancer {
+                server 0.0.0.1; # placeholder
+                balancer_by_<b>lua_block</b> {
+                        balancer.balance()
+                }
+                keepalive 32;
+        }
+        ## start server whereami-ingress.bf52096edbd84ca1b3b6.westeurope.aksapp.io
+        server {
+<b>                server_name whereami-ingress.bf52096edbd84ca1b3b6.westeurope.aksapp.io ;</b>
+<b>                listen 80;</b>
+                set $proxy_upstream_name "-";
+                location / {
+                        set $namespace      "default";
+                        set $ingress_name   "whereami-ingress";
+                        set $service_name   "whereami-ingress";
+                        set $service_port   "80";
+                        set $location_path  "/";
+<b>                        ...
+                        set $proxy_upstream_name "default-whereami-ingress-80";</b>
+                        ...
+<b>                        proxy_set_header X-Forwarded-For        $the_real_ip;</b>
+                        ...
+                        proxy_http_version                      1.1;
+                        proxy_pass <a href="http://upstream_balancer">http://upstream_balancer</a>;
+                }
+        }
+        ## end server whereami-ingress.bf52096edbd84ca1b3b6.westeurope.aksapp.io</pre>
+<p>There are two relevant parts to this:</p>
+<ul>
+<li>The server: this is where nginx configures some parameters for the Web service, such as the rule to inject the X-Forwarded-For header we saw before. It defines a proxy_pass upstream load balancer, which is what will decided to which servers should requests be forwarded</li>
+<li>The first part of the previous snippet contains the definition of the upstream load balancer aptly named upstream_balancer. Here is where the address of the application pods should be listed out, but instead of that we got a call to something named balancer_by_lua_block. What is this?</li>
+</ul>
+<p>The frequent coming and going of pods in a kubernetes cluster would force to updating the nginx config file very frequently. To prevent this, the upstream server addresses (backend servers in ngnix jargon) are not defined in the config file, but dynamically obtained by an external LUA script. LUA is a scripting language with a tight integration into nginx.</p>
+<p>You can see more details about this in these links:</p>
+<ul>
+<li><a href="https://github.com/openresty/lua-nginx-module#balancer_by_lua_block">https://github.com/openresty/lua-nginx-module#balancer_by_lua_block</a></li>
+<li><a href="https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/annotations/#session-affinity">https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/annotations/#session-affinity</a></li>
+</ul>
+<p>You can actually have a look at the directory where LUA scripts are stored:</p>
+<pre>$ k -n kube-system exec -it addon-http-application-routing-nginx-ingress-controller-ffbbqj6 ls /etc/nginx/lua/balancer
+chash.lua  ewma.lua  resty.lua  round_robin.lua  sticky.lua</pre>
+<p>Now let us see the endpoints of our application, whereami-ingress:</p>
+<pre>$ k get ep whereami-ingress
+NAME               ENDPOINTS                      AGE
+whereami-ingress   10.244.0.13:80,10.244.1.9:80   1h</pre>
+<p>If you look at the logs of the ingress pod, you should see how traffic is redirected to both IP addresses:</p>
+<pre>$ k -n kube-system logs pod/addon-http-application-routing-nginx-ingress-controller-ffbbqj6
+...
+109.125.120.58 - [109.125.120.58] - - [22/Jan/2019:10:17:23 +0000] "GET / HTTP/1.1" 200 1740 "-" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/71.0.3578.98 Safari/537.36" 503 0.376 [default-whereami-ingress-80] <b>10.244.0.13</b>:80 4666 0.376 2007db4e626c2149b6ac4213ba5335485cc
+109.125.120.58 - [109.125.120.58] - - [22/Jan/2019:10:17:23 +0000] "GET /styles.css HTTP/1.1" 200 1052 "<a href="http://whereami-ingress.bf52096edbd84ca1b3b6.westeurope.aksapp.io/">http://whereami-ingress.bf52096edbd84ca1b3b6.westeurope.aksapp.io/</a>" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/71.0.3578.98 Safari/537.36" 467 0.001 [default-whereami-ingress-80] <b>10.244.1.9</b>:80 3310 0.000 200 9c33601d4506a3717945417b0517ad06
+109.125.120.58 - [109.125.120.58] - - [22/Jan/2019:10:17:23 +0000] "GET /favicon.ico HTTP/1.1" 200 1150 "<a href="http://whereami-ingress.bf52096edbd84ca1b3b6.westeurope.aksapp.io/">http://whereami-ingress.bf52096edbd84ca1b3b6.westeurope.aksapp.io/</a>" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/71.0.3578.98 Safari/537.36" 532 0.003 [default-whereami-ingress-80] <b>10.244.0.13</b>:80 1150 0.004 200 5394d5ee2ea6822aacec60704ae049c8
+109.125.120.58 - [109.125.120.58] - - [22/Jan/2019:10:26:10 +0000] "GET / HTTP/1.1" 200 4665 "-" "curl/7.58.0" 122 0.581 [default-whereami-ingress-80] <strong>10.244.1.9:80</strong> 4665 0.576 200 acb473c5f0c792b53fd7c936478cd6ec
+109.125.120.58 - [109.125.120.58] - - [22/Jan/2019:10:26:23 +0000] "GET / HTTP/1.1" 200 4666 "-" "curl/7.58.0" 122 0.319 [default-whereami-ingress-80] <strong>10.244.0.13:80</strong> 4666 0.316 200 e86645fb39b6cf9ba6127386ead7f7f1
+109.125.120.58 - [109.125.120.58] - - [22/Jan/2019:10:26:51 +0000] "GET / HTTP/1.1" 200 4665 "-" "curl/7.58.0" 122 0.321 [default-whereami-ingress-80] <strong>10.244.1.9:80</strong> 4665 0.320 200 83512f96fded353d3f3de0da1b0fd17d
+109.125.120.58 - [109.125.120.58] - - [22/Jan/2019:10:27:41 +0000] "GET / HTTP/1.1" 200 4666 "-" "curl/7.58.0" 122 0.296 [default-whereami-ingress-80] <strong>10.244.0.13:80</strong> 4666 0.296 200 15c729ed77f5f4a385e1fe9ea02426d4
+109.125.120.58 - [109.125.120.58] - - [22/Jan/2019:10:33:24 +0000] "GET / HTTP/1.1" 200 4666 "-" "curl/7.58.0" 122 0.380 [default-whereami-ingress-80] <strong>10.244.0.13:80</strong> 4666 0.380 200 9207dfed715b6adab008540b9e36a070</pre>
+<p>We can look at the connection tracking table to see the two sessions (client-nginx and nginx-web). Let's begin with the first one, and use the client's public IP address for a change (so far we have been always using the destination IP):</p>
+<pre>jose@aks-nodepool1-31351229-1:~$ sudo conntrack -L -s 109.125.120.58
+tcp 6 86386 ESTABLISHED src=109.125.120.58 dst=51.136.49.205 sport=63774 dport=80 src=10.244.1.6 dst=109.125.120.58 sport=80 dport=63774 [ASSURED] mark=0 use=1</pre>
+<p>As you can see, the source IP address 109.125.120.58 is not NATted, since the return traffic from the nginx pod is addressed to that very same address.</p>
+<pre>jose@aks-nodepool1-31351229-1:~$ sudo conntrack -L -d 10.244.1.6
+...
+tcp 6 1 TIME_WAIT src=10.244.1.1 dst=10.244.1.6 sport=40606 dport=10254 src=10.244.1.6 dst=10.244.1.1 sport=10254 dport=40606 [ASSURED] mark=0 use=1
+...</pre>
+<p>If we have a look at the second leg of our connectivity, we see that there is no NAT involved, since we are seeing direct pod-to-pod communication:</p>
+<pre>jose@aks-nodepool1-31351229-1:~$ sudo conntrack -L -d 10.244.0.13
+tcp 6 97 TIME_WAIT src=10.244.1.6 dst=10.244.0.13 sport=55710 dport=80 src=10.244.0.13 dst=10.244.1.6 sport=80 dport=55710 [ASSURED] mark=0 use=1</pre>
+<p>It is interesting to see as well that nginx does not use the ClusterIP for reaching the application pods, but their individual endpoint IP addresses. We investigated pod-to-pod communication earlier in this blog.</p>
+<h2>Load Balancing algorithms</h2>
+<p>As we have seen, there are multiple places in the architecture where some kind of load balancing takes place when using an ingress controller:</p>
+<ol>
+<li>The Azure Load Balancer will select one of the nodes containing nginx pods</li>
+<li>The selected node will select one of the nginx pods. Typically there would not be any load balancing here, since you should distribute the ingress controllers over different nodes in your network for better resiliency</li>
+<li>Finally, the nginx reverse-proxy would use its lua-based load balancer to select one of the pods containing the application</li>
+</ol>
+<p>Which load balancing algorithms are used in each case?</p>
+<p>The first one is the easiest: the algorithms for the Azure Load Balancer are well documented, and can be configured per load balancing rule:</p>
+<pre>$ az network lb rule list -g $noderg --lb-name $lb --query [].[name,loadDistribution] -o tsv
+af6ce64281dbb11e9a6ba269b1ccf60c-TCP-80 Default
+a4c1a6c4c1e1d11e99cfe8afbff07ff3-TCP-80 Default
+a4c1a6c4c1e1d11e99cfe8afbff07ff3-TCP-443 Default</pre>
+<p>If you refer to the <a href="https://docs.microsoft.com/en-us/azure/load-balancer/load-balancer-distribution-mode">Azure LB documentation </a>you can see that the default load distribution algorithm is a 5-tuple hash (source/destination address/port and protocol type).</p>
+<p>The second one, which is typically more relevant when ingress controllers are not involved, is NAT based: iptables rules that have assigned a certain probability using the random mode (with the option, you guessed right, --mode random). This is a hash-based algorithm too, as opposed to the nth mode (--mode nth), which would implement a round robin distribution.</p>
+<p>Here you can see again the load balancing example via iptables. As you can see, the first rule has a 50% probability of being chosen. If that is not the case, it will proceed to the second one. Not having a probability configured, the second rule will be chosen 100% of the remaining cases (that is, the remaining 50% of the times):</p>
+<pre>-A KUBE-SVC-7G2JV7LNOR6DDNIY -m comment --comment "default/whereami:" -m statistic --mode random --probability 0.50000000000 -j KUBE-SEP-KFF4FJCPYGQEXMDG
+-A KUBE-SVC-7G2JV7LNOR6DDNIY -m comment --comment "default/whereami:" -j KUBE-SEP-2QV3R2JVLUZRDSSA</pre>
+<p>The last one is a bit trickier, since it is not that clear out of nginx documentation (or at least I did not find it). Normally you would find the load balancing algorithm in the upstream definition, but since the kubernetes implementation uses LUA scripts for distributing the load, there is not a ton of information there:</p>
+<pre>        upstream upstream_balancer {
+                 server 0.0.0.1; # placeholder
+                 <strong>balancer_by_lua_block</strong> {
+                         <strong>balancer.balance()</strong>
+                 }
+                 keepalive 32;
+         }</pre>
+<p>If no load balancing algorithm is specified, nginx defaults to round robin, but I am not sure if that applies as well for lua-based upstreams. The closest document I found is <a href="https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/annotations/#session-affinity">this one</a>, where it is stated that nginx as ingress controller will use a round robin algorithm, unless an annotation for cookie affinity is set.</p>
+<p>And that is all I did, I hope you learnt something today!</p>
